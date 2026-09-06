@@ -1,4 +1,4 @@
-# znnz.net Agent Launcher
+# znnz.net • Agent • Launcher
 
 A simple and easy-to-use AI Agent launcher.
 
