@@ -1,0 +1,24 @@
+/target/
+/dist/
+/*.log
+/*.tmp
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+
+# Local credentials and runtime state
+.env
+.env.*
+!.env.example
+*api-key*
+*.dpapi
+
+# Developer-only captures and installer payloads
+/examples/*.jsonl
+/downloads/
+/installers/
+*.exe
+*.msi
+*.msix
+*.part

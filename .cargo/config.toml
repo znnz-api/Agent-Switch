@@ -1,0 +1,5 @@
+﻿# 将 Microsoft C/C++ 运行库静态链接进正式 EXE。
+# 这样程序可直接运行于未安装 VC++ Redistributable 的 Windows 10/11，
+# 不再依赖 VCRUNTIME140.dll 等外部运行库文件。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,113 @@
+<svg viewBox="0 0 920 127.384615" width="920" height="127.384615" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Four cascade curves with continuous random-staggered moving dots">
+  <!--
+    由 cascade-flow.svg（用户当前调整版）派生优化：
+    - 路径/线宽/虚线/点大小/颜色 完全沿用
+    - 点滑动：伪随机交错 + 全程连贯
+      * 不是一条一条轮播，也不是四条永远齐发
+      * 任意时刻通常 1~3 条有点，偶尔 4 条
+      * 刻意避免「四条同时无点」的停顿期
+    - SMIL 无真随机：24s 长周期 + 不规则 on/off + 错开相位
+  -->
+  <defs>
+    <path id="pT1" d="M 280,5 C 280,66.627 22,63.692 22,122.385"/>
+    <path id="pT2" d="M 400,5 C 400,72.496 314,72.496 314,122.385"/>
+    <path id="pT3" d="M 520,5 C 520,72.496 606,72.496 606,122.385"/>
+    <path id="pT4" d="M 640,5 C 640,66.627 898,63.692 898,122.385"/>
+  </defs>
+
+  <g stroke="#000000" stroke-width="3.0" fill="none" stroke-dasharray="6 0" opacity="0.50" stroke-linecap="round" stroke-linejoin="round">
+    <use href="#pT1"/>
+    <use href="#pT2"/>
+    <use href="#pT3"/>
+    <use href="#pT4"/>
+  </g>
+
+  <g fill="#00dd70">
+    <!--
+      设计目标：24s 内 active 并集连续覆盖，无全局空窗。
+      每条路径仍有短暂停（显得随机），但别处会顶上。
+      内层 3 点相位错开，滑动本身也更密。
+    -->
+
+    <!-- path1：前中段主力，后段补洞 -->
+    <g>
+      <animate attributeName="opacity"
+               values="1;1;0;0;1;1;0;0;1;1"
+               keyTimes="0;0.22;0.24;0.30;0.32;0.58;0.60;0.68;0.70;1"
+               dur="24s" repeatCount="indefinite"/>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.48s" repeatCount="indefinite" begin="0.00s"><mpath href="#pT1"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.48s" begin="0.00s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.48s" repeatCount="indefinite" begin="0.48s"><mpath href="#pT1"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.48s" begin="0.48s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.48s" repeatCount="indefinite" begin="0.96s"><mpath href="#pT1"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.48s" begin="0.96s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+
+    <!-- path2：覆盖 path1 第一段休息，并贯穿中段 -->
+    <g>
+      <animate attributeName="opacity"
+               values="0;0;1;1;0;0;1;1;0;0;1;1"
+               keyTimes="0;0.08;0.10;0.36;0.38;0.46;0.48;0.74;0.76;0.84;0.86;1"
+               dur="24s" repeatCount="indefinite"/>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.62s" repeatCount="indefinite" begin="0.22s"><mpath href="#pT2"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.62s" begin="0.22s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.62s" repeatCount="indefinite" begin="0.74s"><mpath href="#pT2"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.62s" begin="0.74s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.62s" repeatCount="indefinite" begin="1.26s"><mpath href="#pT2"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.62s" begin="1.26s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+
+    <!-- path3：中后段主力，补 path1 第二段休息 -->
+    <g>
+      <animate attributeName="opacity"
+               values="1;1;0;0;1;1;0;0;1;1"
+               keyTimes="0;0.14;0.16;0.28;0.30;0.64;0.66;0.78;0.80;1"
+               dur="24s" repeatCount="indefinite"/>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.40s" repeatCount="indefinite" begin="0.35s"><mpath href="#pT3"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.40s" begin="0.35s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.40s" repeatCount="indefinite" begin="0.80s"><mpath href="#pT3"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.40s" begin="0.80s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.40s" repeatCount="indefinite" begin="1.20s"><mpath href="#pT3"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.40s" begin="1.20s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+
+    <!-- path4：贯穿补缝，保证全局无空窗 -->
+    <g>
+      <animate attributeName="opacity"
+               values="1;1;0;0;1;1;0;0;1;1;0;0;1;1"
+               keyTimes="0;0.12;0.14;0.20;0.22;0.42;0.44;0.52;0.54;0.72;0.74;0.82;0.84;1"
+               dur="24s" repeatCount="indefinite"/>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.56s" repeatCount="indefinite" begin="0.10s"><mpath href="#pT4"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.56s" begin="0.10s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.56s" repeatCount="indefinite" begin="0.62s"><mpath href="#pT4"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.56s" begin="0.62s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="6" opacity="0">
+        <animateMotion dur="1.56s" repeatCount="indefinite" begin="1.14s"><mpath href="#pT4"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.72;1" dur="1.56s" begin="1.14s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+  </g>
+</svg>

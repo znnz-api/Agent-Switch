@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="16" viewBox="0 0 48 16" fill="none">
+  <!-- Runtime sprite: red close, yellow minimize, green fixed-size glyphs. -->
+  <path d="M5.55 5.55l4.9 4.9m0-4.9l-4.9 4.9" stroke="#7b1715" stroke-width="1.25" stroke-linecap="round"/>
+  <path d="M20.65 8h6.7" stroke="#815806" stroke-width="1.25" stroke-linecap="round"/>
+  <path d="M37.15 7.15V5.1h2.05M42.85 8.85v2.05H40.8M39.15 5.15L37.2 7.1M40.85 10.85l1.95-1.95" stroke="#0a6720" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

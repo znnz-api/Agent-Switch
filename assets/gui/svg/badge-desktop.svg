@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none">
+  <!-- 桌面角标：显示器 + 底座 -->
+  <rect x="3.2" y="4.5" width="25.6" height="17.8" rx="4" fill="rgba(12,16,24,0.88)" stroke="rgba(255,255,255,0.42)" stroke-width="1.2"/>
+  <rect x="5.4" y="6.8" width="21.2" height="13.2" rx="2" fill="rgba(120,170,255,0.22)" stroke="rgba(180,210,255,0.28)" stroke-width="0"/>
+  <path d="M12.2 22.4 H19.8 L21.4 26.2 H10.6 Z" fill="rgba(12,16,24,0.92)" stroke="rgba(255,255,255,0.36)" stroke-width="1"/>
+  <rect x="9.2" y="26.2" width="13.6" height="1.8" rx="0.9" fill="rgba(220,230,245,0.75)"/>
+</svg>

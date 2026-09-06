@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none">
+  <!-- 命令行角标：终端窗口 + 提示符 -->
+  <rect x="2.5" y="5" width="27" height="22" rx="4" fill="rgba(12,16,24,0.88)" stroke="rgba(255,255,255,0.42)" stroke-width="1.2"/>
+  <rect x="2.5" y="5" width="27" height="6" rx="0" fill="rgba(255,255,255,0.12)"/>
+  <rect x="2.5" y="8" width="27" height="0" fill="rgba(255,255,255,0.12)"/>
+  <circle cx="7.2" cy="8.5" r="1.15" fill="#ff5f57"/>
+  <circle cx="11.1" cy="8.5" r="1.15" fill="#febc2e"/>
+  <circle cx="15" cy="8.5" r="1.15" fill="#28c840"/>
+  <path d="M8.2 15.2 L12.6 18.4 L8.2 21.6" stroke="#9ed0ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M14.4 21.6 H22.2" stroke="#d7e7ff" stroke-width="1.8" stroke-linecap="round"/>
+</svg>
