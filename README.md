@@ -13,7 +13,7 @@ Quickly install • configure • launch Codex CLI & Codex Desktop & Claude Code
 
 The launcher automatically detects client status and provides the gateway's available model list, connection testing, and runtime logs.
 
-![znnz.net Agent Launcher English interface](./znnz-Agent-Launcher-v1.0-en‑US.jpg)
+![znnz.net Agent Launcher English interface](./znnz-Agent-Launcher-v1.0-en‑US.png)
 
 ## 中文
 
