@@ -3421,7 +3421,8 @@ fn paint_svg_texture(ui: &egui::Ui, texture: &TextureHandle, rect: Rect, uv: Rec
 
 fn unpremultiply_rgba(premultiplied: &[u8]) -> Vec<u8> {
     let mut rgba = premultiplied.to_vec();
-    for pixel in rgba.chunks_exact_mut(4) {
+    let (pixels, _) = rgba.as_chunks_mut::<4>();
+    for pixel in pixels {
         let alpha = pixel[3] as u16;
         for channel in &mut pixel[..3] {
             let numerator = *channel as u16 * 255 + alpha / 2;
@@ -4342,7 +4343,8 @@ mod tests {
             layout::CASCADE_FLOW_HEIGHT as u32 * 4,
         )
         .expect("cascade-flow.svg should rasterize");
-        assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        let (pixels, _) = rgba.as_chunks::<4>();
+        assert!(pixels.iter().any(|pixel| pixel[3] != 0));
     }
 
     #[test]
@@ -4743,7 +4745,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{name}.svg 渲染失败: {error:#}"));
             assert_eq!(rgba.len(), (*width * *height * 4) as usize);
             assert!(
-                rgba.chunks_exact(4).any(|pixel| pixel[3] != 0),
+                rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0),
                 "{name}.svg 渲染结果完全透明"
             );
         }
