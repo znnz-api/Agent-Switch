@@ -30,7 +30,7 @@ The launcher automatically detects client status and provides the gateway's avai
 
 启动器会自动检测客户端状态，并提供网关可用模型列表、连接测试和运行日志。
 
-![znnz.net Agent Launcher 中文界面](./znnz-Agent-Launcher-v1.0-zh‑CN.png)
+![znnz.net Agent Launcher 中文界面](./znnz-Agent-Launcher-v1.0-zh‑CN.jpg)
 
 ## License / 开源协议
 
