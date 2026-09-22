@@ -58,7 +58,7 @@ use windows::Win32::{
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const LOG_SECTION_FOOTER: &str = "------------------------------";
 const LOG_SECTION_SEPARATOR: &str = "\n\n\n";
-pub const WINDOW_TITLE: &str = "znnz • Agent • Launcher • v1.0";
+pub const WINDOW_TITLE: &str = "znnz • Agent • Launcher • v1.1";
 const LOGO_URL: &str = "https://r.networkpe.top/znnz-Logo";
 const GATEWAY_INFO_URL: &str = "https://r.networkpe.top/znnz-API";
 const UPDATE_URL: &str = "https://r.networkpe.top/znnz-Update";

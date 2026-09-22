@@ -1,6 +1,6 @@
 [package]
 name = "znnz-agent-launcher"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "Windows launcher for Codex and Claude clients with znnz.net and custom AI gateways"
 license = "Apache-2.0"

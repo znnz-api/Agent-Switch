@@ -85,7 +85,21 @@ pub fn read_catalog(path: &Path) -> Result<Value> {
 }
 
 pub fn normalize_catalog(value: &Value) -> Result<Value> {
-    let mut normalized = if value.get("models").and_then(Value::as_array).is_some() {
+    let models = value.get("models").and_then(Value::as_array);
+    let data = value.get("data").and_then(Value::as_array);
+    // Some gateways return an auxiliary models[].name array alongside the
+    // actual OpenAI data[].id catalog. Its presence alone does not make it a
+    // Codex catalog. If any entry has a slug, still validate the entire array
+    // so malformed, hidden-only, or duplicate catalogs cannot be bypassed.
+    let has_codex_slugs = models.is_some_and(|models| {
+        models.iter().any(|model| {
+            model
+                .get("slug")
+                .and_then(Value::as_str)
+                .is_some_and(|slug| !slug.trim().is_empty())
+        })
+    });
+    let mut normalized = if models.is_some() && (has_codex_slugs || data.is_none()) {
         json!({ "models": value["models"].clone() })
     } else {
         let data = value
@@ -419,6 +433,65 @@ mod tests {
             3
         );
         assert_eq!(normalized["models"][1]["default_reasoning_level"], "medium");
+    }
+
+    #[test]
+    fn uses_standard_data_when_models_contains_auxiliary_metadata() {
+        let normalized = normalize_catalog(&json!({
+            "object": "list",
+            "models": [
+                {"name": "jev-1.13.0", "description": "metadata", "release_date": "2026-09-01"},
+                {"name": "jev-latest"}
+            ],
+            "data": [{"id": "claude-fable-5"}, {"id": "gpt-6-astra"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            visible_slugs(&normalized),
+            vec!["claude-fable-5", "gpt-6-astra"]
+        );
+        assert_eq!(
+            select_default_model(&normalized, None).unwrap(),
+            "claude-fable-5"
+        );
+        // Reading an already normalized local catalog must preserve it.
+        assert_eq!(normalize_catalog(&normalized).unwrap(), normalized);
+    }
+
+    #[test]
+    fn prefers_codex_metadata_when_both_catalogs_are_present() {
+        let model = json!({
+            "slug": "custom-model", "display_name": "Custom",
+            "context_window": 256000, "default_reasoning_level": "high",
+            "supported_reasoning_levels": [{"effort": "high", "description": "Native"}]
+        });
+        let normalized = normalize_catalog(&json!({
+            "models": [model.clone()], "data": [{"id": "other-model"}]
+        }))
+        .unwrap();
+        assert_eq!(normalized["models"][0], model);
+    }
+
+    #[test]
+    fn empty_models_can_use_data_but_invalid_catalogs_still_fail() {
+        let normalized = normalize_catalog(&json!({
+            "models": [], "data": [{"id": "only-model"}]
+        }))
+        .unwrap();
+        assert_eq!(visible_slugs(&normalized), vec!["only-model"]);
+        for value in [
+            json!({"models": [{"name": "metadata"}]}),
+            json!({"models": [{"name": "metadata"}], "data": []}),
+            json!({"models": [{"name": "metadata"}], "data": [{"id": " "}]}),
+            json!({"models": [{"name": "metadata"}], "data": [{"id": "dup"}, {"id": "dup"}]}),
+            json!({"models": [{"slug": "valid"}, {"name": "broken"}], "data": [{"id": "fallback"}]}),
+            json!({"models": [{"slug": "hidden", "visibility": "hide"}], "data": [{"id": "fallback"}]}),
+        ] {
+            assert!(
+                normalize_catalog(&value).is_err(),
+                "unexpectedly accepted: {value}"
+            );
+        }
     }
 
     #[test]
