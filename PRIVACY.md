@@ -1,27 +1,21 @@
-# Privacy
+# Privacy / 隐私说明
 
-znnz.net Agent Launcher contains no telemetry, advertising, or behavioral analytics.
+## English
 
-The launcher only connects to the following services when the related action is requested:
+Agent-Switch contains no telemetry, advertising, or behavioral analytics.
 
-- The AI gateway entered by the user
-- Client installation sources
-- The official npm registry or npmmirror
+Configuration, logs, client configuration backups, and usage statistics are stored locally under `%LOCALAPPDATA%\Agent-Switch`. Saved API Keys are encrypted with Windows DPAPI.
 
-The endpoint, UI preferences, logs, and client configuration backups are stored in the current Windows user's local data directory. A remembered API Key is encrypted with Windows DPAPI.
+In gateway mode, API Keys and model requests are sent to the provider selected by the user. Client installation accesses the relevant download sources or npm registries. The application also fetches the cloud provider preset list and icons; these requests do not upload user configuration or API Keys.
 
-When a custom gateway is used, the API Key and model requests are sent to that gateway operator. They are not sent to znnz.net.
+Usage statistics and request metadata are stored in the local SQLite database, `usage.sqlite3`, and are not uploaded to an analytics service. The database does not store plaintext API Keys, prompts, or model replies. Agent-Switch does not estimate billing.
 
 ## 中文
 
-znnz.net Agent Launcher 不包含遥测、广告或行为分析功能。
+Agent-Switch 不包含遥测、广告或行为分析功能。
 
-程序只在用户执行相应操作时访问：
+配置、日志、客户端配置备份和用量统计保存在本机 `%LOCALAPPDATA%\Agent-Switch` 目录。保存的 API Key 使用 Windows DPAPI 加密。
 
-- 用户填写的 AI 网关
-- 客户端安装源
-- npm 官方源或 npmmirror
+网关模式下，API Key 和模型请求会发送给用户选择的提供商。安装客户端时访问相应下载源或 npm 源。程序还会获取云端提供商预设清单与图标，此过程不会上传用户配置或 API Key。
 
-接口地址、界面偏好、日志和客户端配置备份保存在当前 Windows 用户目录。选择记住 API Key 时，使用 Windows DPAPI 加密保存。
-
-使用自定义网关时，API Key 和模型请求会发送给该网关运营者，不会发送给 znnz.net。
+用量统计与请求元数据保存在本地 SQLite 数据库 `usage.sqlite3`，不上传到统计服务。数据库不保存明文 API Key、请求正文或模型回答，也不估算费用。

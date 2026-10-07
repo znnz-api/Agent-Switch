@@ -34,8 +34,8 @@ impl ClientRuntimeState {
             model_list_mode,
             started_at_ms: now,
             heartbeat_ms: now,
-            log_path: std::env::var_os(RUNTIME_LOG_PATH_ENV)
-                .map(PathBuf::from)
+            log_path: crate::background::log_path()
+                .or_else(|| std::env::var_os(RUNTIME_LOG_PATH_ENV).map(PathBuf::from))
                 .unwrap_or_default(),
             executable_path: std::env::current_exe()
                 .context("无法确定后台工作进程的可执行文件路径")?,
@@ -67,9 +67,17 @@ pub async fn run_registered<F>(
 where
     F: Future<Output = Result<()>>,
 {
-    let mutex_name = format!(r"Local\znnz-client-worker-{}", target.id());
+    let mutex_name = format!(
+        r"Local\Agent-Switch-worker-{}{}",
+        if crate::background::is_managed() {
+            "v3-"
+        } else {
+            ""
+        },
+        target.id()
+    );
     let _worker_mutex = crate::platform::try_acquire_named_mutex(&mutex_name)?
-        .ok_or_else(|| anyhow::anyhow!("{} 已经由 znnz-client 后台进程维护", target.title()))?;
+        .ok_or_else(|| anyhow::anyhow!("{} 已经由 Agent-Switch 后台进程维护", target.title()))?;
 
     let path = state_path(target)?;
     let mut state = ClientRuntimeState::new(target, model_list_mode)?;
@@ -185,7 +193,13 @@ fn runtime_root() -> Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .context("无法确定 LOCALAPPDATA")?;
-    Ok(local.join("znnz-client").join("runtime"))
+    Ok(local
+        .join("Agent-Switch")
+        .join(if crate::background::is_managed() {
+            "runtime-v3"
+        } else {
+            "runtime"
+        }))
 }
 
 fn state_path(target: ClientTarget) -> Result<PathBuf> {

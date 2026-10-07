@@ -228,7 +228,10 @@ pub async fn inject_all(
         if crate::i18n::language() == crate::i18n::Language::ZhCn {
             warn!("部分渲染页面注入失败: {error}");
         } else {
-            warn!("Some rendered pages failed injection: {error}");
+            warn!(
+                "Some rendered pages failed injection: {}",
+                crate::i18n::runtime_error_text(&error)
+            );
         }
     }
     Ok(injected)

@@ -2,7 +2,7 @@
 name = "znnz-agent-launcher"
 version = "1.1.0"
 edition = "2024"
-description = "Windows launcher for Codex and Claude clients with znnz.net and custom AI gateways"
+description = "Agent-Switch local AI gateway manager for Codex and Claude clients"
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["codex", "claude", "ai-gateway", "launcher"]
@@ -33,6 +33,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "stream"] }
 rpassword = "7"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -62,6 +63,7 @@ windows = { version = "0.62", features = [
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_System_Time",
   "Win32_UI_Shell",
   "Win32_UI_HiDpi",
   "Win32_UI_WindowsAndMessaging"
@@ -77,5 +79,3 @@ strip = "symbols"
 
 [build-dependencies]
 winresource = "0.1"
-
-

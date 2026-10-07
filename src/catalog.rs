@@ -19,7 +19,7 @@ pub async fn fetch_catalog(
     let gateway = GatewayIdentity::parse(gateway_url)?;
     let source_label = gateway.source_label();
     let endpoint = models_endpoint(gateway_url, client_version)?;
-    let client = network_proxy::configure_reqwest_builder(reqwest::Client::builder())?
+    let client = network_proxy::builder_for_url(reqwest::Client::builder(), gateway_url)?
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(35))
         .user_agent(format!(
@@ -28,35 +28,60 @@ pub async fn fetch_catalog(
         ))
         .build()?;
 
-    let request = client
-        .get(endpoint.clone())
-        .header(AUTHORIZATION, format!("Bearer {api_key}"))
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header(ACCEPT, "application/json")
-        .header(USER_AGENT, format!("codex-cli/{client_version}"));
-    let response = network_proxy::send_with_network_retry(request)
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "{} {}: {}{}{}",
-                crate::i18n::tr("无法连接模型接口", "Unable to connect to model endpoint"),
-                endpoint_origin(&endpoint),
-                error,
-                if crate::gateway::connection_error_hint(&gateway, &error).is_empty() {
-                    ""
-                } else {
-                    ". "
-                },
-                crate::gateway::connection_error_hint(&gateway, &error)
-            )
-        })?;
-
-    let status = response.status();
-    let body = response.text().await.context(crate::i18n::tr(
-        "读取模型接口响应失败",
-        "Unable to read model endpoint response",
-    ))?;
+    // Some gateways use anthropic-version to select a Claude-specific catalog
+    // with route aliases instead of actual model IDs. Request the standard
+    // catalog first; use Anthropic headers when the endpoint requires them.
+    let request = |anthropic: bool| {
+        let request = client
+            .get(endpoint.clone())
+            .header(ACCEPT, "application/json")
+            .header(USER_AGENT, format!("codex-cli/{client_version}"));
+        if anthropic {
+            request
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+        } else {
+            request.header(AUTHORIZATION, format!("Bearer {api_key}"))
+        }
+    };
+    // Anthropic reports a missing version header as 400, not 401/403.
+    // Inspect that explicit error without treating every 400 as an auth issue.
+    let mut anthropic = endpoint.host_str() == Some("api.anthropic.com");
+    let (status, response_source, body) = loop {
+        let response = network_proxy::send_with_network_retry(request(anthropic))
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "{} {}: {}{}{}",
+                    crate::i18n::tr("无法连接模型接口", "Unable to connect to model endpoint"),
+                    endpoint_origin(&endpoint),
+                    error,
+                    if crate::gateway::connection_error_hint(&gateway, &error).is_empty() {
+                        ""
+                    } else {
+                        ". "
+                    },
+                    crate::gateway::connection_error_hint(&gateway, &error)
+                )
+            })?;
+        let status = response.status();
+        let response_source = response
+            .headers()
+            .get("x-agent-switch-upstream")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let body = response.text().await.context(crate::i18n::tr(
+            "读取模型接口响应失败",
+            "Unable to read model endpoint response",
+        ))?;
+        if !anthropic && catalog_requires_anthropic_headers(status.as_u16(), &body) {
+            anthropic = true;
+            continue;
+        }
+        break (status, response_source, body);
+    };
     if !status.is_success() {
         let short = body.chars().take(500).collect::<String>();
         bail!(
@@ -67,13 +92,59 @@ pub async fn fetch_catalog(
         );
     }
 
-    let parsed: Value = serde_json::from_str(&body).context(crate::i18n::tr(
+    let mut parsed: Value = serde_json::from_str(&body).context(crate::i18n::tr(
         "模型接口没有返回有效 JSON",
         "Model endpoint did not return valid JSON",
     ))?;
+    if Url::parse(gateway_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .as_deref()
+        == Some("generativelanguage.googleapis.com")
+    {
+        strip_google_model_prefixes(&mut parsed);
+    }
     let mut normalized = normalize_catalog(&parsed)?;
+    let source_label = response_source
+        .as_deref()
+        .and_then(|source| GatewayIdentity::parse(source).ok())
+        .map(|source| source.source_label())
+        .unwrap_or(source_label);
     apply_online_source_description(&mut normalized, &source_label)?;
     Ok(normalized)
+}
+
+fn strip_google_model_prefixes(value: &mut Value) {
+    for key in ["id", "slug", "name"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str).map(str::to_owned) {
+            if let Some(short) = text.strip_prefix("models/") {
+                value[key] = Value::String(short.to_owned());
+            }
+        }
+    }
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(strip_google_model_prefixes),
+        Value::Object(map) => map.values_mut().for_each(strip_google_model_prefixes),
+        _ => {}
+    }
+}
+
+fn catalog_requires_anthropic_headers(status: u16, body: &str) -> bool {
+    if matches!(status, 401 | 403) {
+        return true;
+    }
+    if status != 400 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let error = &value["error"];
+    error["type"] == "invalid_request_error"
+        && error["message"].as_str().is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("anthropic-version") && message.contains("required")
+        })
 }
 
 pub fn read_catalog(path: &Path) -> Result<Value> {
@@ -82,6 +153,61 @@ pub fn read_catalog(path: &Path) -> Result<Value> {
     let parsed: Value = serde_json::from_str(&raw)
         .with_context(|| format!("模型目录不是有效 JSON: {}", path.display()))?;
     normalize_catalog(&parsed)
+}
+
+pub fn read_model_menu_catalog(path: &Path) -> Result<Value> {
+    let raw = fs::read(path).with_context(|| format!("无法读取模型目录 {}", path.display()))?;
+    let mut value: Value = serde_json::from_slice(&raw)?;
+    normalize_catalog_model_ids(&mut value);
+    validate_model_menu_catalog(&value)?;
+    normalize_agent_models(&mut value)?;
+    Ok(value)
+}
+
+// Presentation metadata never changes the gateway's catalog or request routing.
+pub fn model_menu_catalog(catalog: &Value, hidden_models: &[String]) -> Value {
+    let mut menu = catalog.clone();
+    normalize_catalog_model_ids(&mut menu);
+    let hidden_ids = hidden_models
+        .iter()
+        .map(|model| canonical_model_id(model))
+        .collect::<Vec<_>>();
+    let hidden: HashSet<&str> = hidden_ids.iter().map(String::as_str).collect();
+    if let Some(models) = menu.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            if model
+                .get("slug")
+                .and_then(Value::as_str)
+                .is_some_and(|id| hidden.contains(id))
+            {
+                model["visibility"] = Value::String("hide".into());
+            }
+        }
+    }
+    menu["agent_switch_hidden_models"] = json!(hidden_ids);
+    menu
+}
+
+fn canonical_model_id(model: &str) -> String {
+    model.strip_prefix("models/").unwrap_or(model).to_owned()
+}
+
+/// Model menu files are also read from older Agent-Switch versions. Normalize
+/// the Google REST resource prefix at this boundary so a hot reattach cannot
+/// reintroduce `models/` after the online catalog was already corrected.
+fn normalize_catalog_model_ids(value: &mut Value) {
+    if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            for key in ["slug", "id", "name", "display_name"] {
+                if let Some(text) = model.get(key).and_then(Value::as_str) {
+                    let canonical = canonical_model_id(text);
+                    if canonical != text {
+                        model[key] = Value::String(canonical);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn normalize_catalog(value: &Value) -> Result<Value> {
@@ -99,7 +225,23 @@ pub fn normalize_catalog(value: &Value) -> Result<Value> {
                 .is_some_and(|slug| !slug.trim().is_empty())
         })
     });
-    let mut normalized = if models.is_some() && (has_codex_slugs || data.is_none()) {
+    // A few gateways return an internal picker entry such as
+    // `codex-auto-review` in `models`, alongside the real OpenAI-compatible
+    // catalog in `data`. Treat an all-non-conversational `models` array as
+    // auxiliary metadata so Codex does not collapse the picker to
+    // "default model + All models".
+    let models_have_conversational_entry = models.is_some_and(|models| {
+        models.iter().any(|model| {
+            ["slug", "id", "name", "display_name"]
+                .iter()
+                .filter_map(|key| model.get(*key).and_then(Value::as_str))
+                .map(str::trim)
+                .any(is_conversational_model)
+        })
+    });
+    let mut normalized = if models.is_some()
+        && (data.is_none() || (has_codex_slugs && models_have_conversational_entry))
+    {
         json!({ "models": value["models"].clone() })
     } else {
         let data = value
@@ -116,6 +258,7 @@ pub fn normalize_catalog(value: &Value) -> Result<Value> {
             .collect::<Vec<_>>();
         json!({ "models": models })
     };
+    normalize_catalog_model_ids(&mut normalized);
     normalize_agent_models(&mut normalized)?;
     validate_catalog(&normalized)?;
     Ok(normalized)
@@ -220,6 +363,14 @@ fn supports_expanded_reasoning(slug: &str) -> bool {
 }
 
 pub fn validate_catalog(value: &Value) -> Result<()> {
+    validate_catalog_structure(value, true)
+}
+
+pub fn validate_model_menu_catalog(value: &Value) -> Result<()> {
+    validate_catalog_structure(value, false)
+}
+
+fn validate_catalog_structure(value: &Value, require_visible: bool) -> Result<()> {
     let models = value
         .get("models")
         .and_then(Value::as_array)
@@ -246,7 +397,7 @@ pub fn validate_catalog(value: &Value) -> Result<()> {
             visible += 1;
         }
     }
-    if visible == 0 {
+    if require_visible && visible == 0 {
         bail!("模型目录没有可见且受支持的模型");
     }
     Ok(())
@@ -362,12 +513,7 @@ fn models_endpoint(gateway_url: &str, client_version: &str) -> Result<Url> {
     }
     base.set_query(None);
     base.set_fragment(None);
-    let path = base.path().trim_end_matches('/');
-    let next = if path.ends_with("/v1") || path == "v1" {
-        format!("{path}/models")
-    } else {
-        format!("{path}/v1/models")
-    };
+    let next = crate::gateway::upstream_api_path(&base, "/v1/models");
     base.set_path(&next);
     if gateway.is_znnz {
         base.query_pairs_mut()
@@ -391,6 +537,24 @@ fn endpoint_origin(url: &Url) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_menu_models_keep_metadata_and_allow_all_hidden_without_changing_upstream() {
+        let upstream =
+            normalize_catalog(&json!({"data": [{"id": "gpt-old"}, {"id": "gpt-new"}]})).unwrap();
+        let menu = model_menu_catalog(&upstream, &["gpt-old".into(), "missing-model".into()]);
+        assert_eq!(visible_slugs(&menu), vec!["gpt-new"]);
+        assert_eq!(menu["models"][0]["supported_in_api"], true);
+        assert_eq!(visible_slugs(&upstream), vec!["gpt-old", "gpt-new"]);
+        let empty_menu = model_menu_catalog(&upstream, &["gpt-old".into(), "gpt-new".into()]);
+        validate_model_menu_catalog(&empty_menu).unwrap();
+        assert!(validate_catalog(&empty_menu).is_err());
+        assert!(visible_slugs(&empty_menu).is_empty());
+        assert!(
+            validate_model_menu_catalog(&json!({"models":[{"slug":"same"},{"slug":"same"}]}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn accepts_valid_catalog_and_filters_hidden_models() {
@@ -436,6 +600,26 @@ mod tests {
     }
 
     #[test]
+    fn google_catalog_model_names_drop_only_the_models_prefix() {
+        let mut value = json!({"data":[{"id":"models/gemini-3.8-flash","name":"models/gemini-3.8-flash"}],"next":"models/not-a-model-field"});
+        strip_google_model_prefixes(&mut value);
+        assert_eq!(value["data"][0]["id"], "gemini-3.8-flash");
+        assert_eq!(value["data"][0]["name"], "gemini-3.8-flash");
+        assert_eq!(value["next"], "models/not-a-model-field");
+    }
+
+    #[test]
+    fn model_menu_canonicalizes_legacy_google_ids_and_hidden_names() {
+        let menu = model_menu_catalog(
+            &json!({"models":[{"slug":"models/gemini-3.7-flash","display_name":"models/gemini-3.7-flash","visibility":"list","supported_in_api":true}]}),
+            &["models/gemini-3.7-flash".into()],
+        );
+        assert_eq!(menu["models"][0]["slug"], "gemini-3.7-flash");
+        assert_eq!(menu["models"][0]["visibility"], "hide");
+        assert_eq!(menu["agent_switch_hidden_models"][0], "gemini-3.7-flash");
+    }
+
+    #[test]
     fn uses_standard_data_when_models_contains_auxiliary_metadata() {
         let normalized = normalize_catalog(&json!({
             "object": "list",
@@ -456,6 +640,24 @@ mod tests {
         );
         // Reading an already normalized local catalog must preserve it.
         assert_eq!(normalize_catalog(&normalized).unwrap(), normalized);
+    }
+
+    #[test]
+    fn uses_standard_data_when_models_only_contains_internal_picker_entries() {
+        let normalized = normalize_catalog(&json!({
+            "models": [{
+                "slug": "codex-auto-review",
+                "display_name": "codex-auto-review",
+                "visibility": "list",
+                "supported_in_api": true
+            }],
+            "data": [{"id": "gpt-6.1-sol"}, {"id": "claude-sonnet-4-6"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            visible_slugs(&normalized),
+            vec!["gpt-6.1-sol", "claude-sonnet-4-6"]
+        );
     }
 
     #[test]

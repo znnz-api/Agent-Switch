@@ -12,6 +12,7 @@
     config: { ...incoming },
     catalog: { models: [] },
     names: [],
+    hiddenNames: new Set(),
     metadata: new Map(),
     loadedAt: 0,
     loading: null,
@@ -48,6 +49,7 @@
     state.catalog = { ...payload, models };
     state.metadata = metadata;
     state.names = unique(models.map((model) => model.slug));
+    state.hiddenNames = new Set(unique(payload?.agent_switch_hidden_models || []));
     state.loadedAt = Date.now();
     return state.catalog;
   };
@@ -273,10 +275,16 @@
     && value.every((item) => item && typeof item === "object" && typeof item.model === "string");
 
   const patchModelDescriptorArray = (models, allowEmpty = false) => {
-    if (!isModelDescriptorArray(models, allowEmpty) || !state.names.length) return false;
+    if (!isModelDescriptorArray(models, allowEmpty) || !state.loadedAt) return false;
+    let changed = false;
+    for (let index = models.length - 1; index >= 0; index -= 1) {
+      if (state.hiddenNames.has(models[index].model)) {
+        models.splice(index, 1);
+        changed = true;
+      }
+    }
     const template = models.find((item) => item && typeof item.model === "string") || null;
     const existing = new Map(models.map((item) => [item.model, item]));
-    let changed = false;
 
     for (const [name, item] of existing) {
       if (!state.metadata.has(name)) continue;
@@ -304,6 +312,7 @@
     for (const key of ["availableModels", "available_models"]) {
       const current = value[key];
       if (current instanceof Set) {
+        for (const name of state.hiddenNames) if (current.delete(name)) changed = true;
         for (const name of state.names) {
           if (!current.has(name)) {
             current.add(name);
@@ -311,6 +320,12 @@
           }
         }
       } else if (Array.isArray(current) && current.every((item) => typeof item === "string")) {
+        for (let index = current.length - 1; index >= 0; index -= 1) {
+          if (state.hiddenNames.has(current[index])) {
+            current.splice(index, 1);
+            changed = true;
+          }
+        }
         for (const name of state.names) {
           if (!current.includes(name)) {
             current.push(name);
@@ -321,8 +336,8 @@
     }
     for (const key of ["hiddenModels", "hidden_models"]) {
       if (!Array.isArray(value[key]) || !value[key].every((item) => typeof item === "string")) continue;
-      const next = value[key].filter((name) => !state.names.includes(name));
-      if (next.length !== value[key].length) {
+      const next = unique([...value[key].filter((name) => !state.names.includes(name)), ...state.hiddenNames]);
+      if (next.length !== value[key].length || next.some((name, index) => name !== value[key][index])) {
         value[key] = next;
         changed = true;
       }
@@ -366,7 +381,7 @@
   };
 
   const patchModelListResult = (result) => {
-    if (!result || typeof result !== "object" || !state.names.length) return false;
+    if (!result || typeof result !== "object" || !state.loadedAt) return false;
     let changed = false;
     let foundModelArray = false;
     for (const [models, allowEmpty] of modelArrayCandidates(result)) {
@@ -388,7 +403,7 @@
     const value = config.value;
     const available = Array.isArray(value.available_models)
       && value.available_models.every((item) => typeof item === "string")
-      ? [...value.available_models]
+      ? value.available_models.filter((name) => !state.hiddenNames.has(name))
       : [];
     for (const modelName of state.names) if (!available.includes(modelName)) available.push(modelName);
     const nextValue = {
@@ -516,7 +531,7 @@
   };
 
   const refreshPass = () => {
-    if (!state.names.length) return;
+    if (!state.loadedAt) return;
     try { patchStatsig(); } catch (error) { logFailure("statsig", error); }
     try { scanWebpackClients(); } catch (error) { logFailure("request-client", error); }
     try { patchModelPickerLabels(); } catch (error) { logFailure("model-labels", error); }

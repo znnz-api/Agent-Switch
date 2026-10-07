@@ -77,7 +77,11 @@ pub fn runtime_error(error: &anyhow::Error) -> String {
 }
 
 pub fn runtime_error_text(detail: &str) -> String {
-    if language() == Language::ZhCn {
+    runtime_error_text_for_language(detail, language())
+}
+
+fn runtime_error_text_for_language(detail: &str, language: Language) -> String {
+    if language == Language::ZhCn {
         return detail.to_owned();
     }
 
@@ -145,6 +149,17 @@ mod tests {
         assert_eq!(
             strip_cjk("connect timed out: https://api.example.com"),
             "connect timed out: https://api.example.com"
+        );
+        assert_eq!(
+            runtime_error_text_for_language(
+                "Codex Desktop • Auto-restart • failed!: gateway connection timed out",
+                Language::En
+            ),
+            "Codex Desktop • Auto-restart • failed!: gateway connection timed out"
+        );
+        assert_eq!(
+            runtime_error_text_for_language("启动失败", Language::En),
+            "The operation failed."
         );
     }
 }

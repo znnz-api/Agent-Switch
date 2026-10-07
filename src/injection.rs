@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 const MODEL_SCRIPT: &str = include_str!("../assets/renderer-inject.js");
 
-const MODEL_HEALTH: &str = "Boolean(globalThis.__ZNNZ_MODEL_UNLOCK__?.health?.().installed && globalThis.__ZNNZ_MODEL_UNLOCK__?.health?.().modelCount > 0)";
+const MODEL_HEALTH: &str = "Boolean(globalThis.__ZNNZ_MODEL_UNLOCK__?.health?.().installed && (globalThis.__ZNNZ_MODEL_UNLOCK__?.health?.().modelCount > 0 || (globalThis.__ZNNZ_CLIENT_CONFIG__?.allowEmptyModelList && globalThis.__ZNNZ_MODEL_UNLOCK__?.health?.().loadedAt > 0)))";
 const MODEL_DETAILS: &str = "globalThis.__ZNNZ_MODEL_UNLOCK__?.health?.() ?? { installed: false, modelCount: 0, catalogSource: 'none', failures: [{ where: 'bootstrap', message: 'model injection object is missing' }] }";
 
 #[derive(Clone, Debug)]
@@ -33,10 +33,11 @@ pub fn build(
     default_model: Option<&str>,
     model_description: &str,
 ) -> Result<ScriptBundle> {
-    crate::catalog::validate_catalog(catalog)?;
+    crate::catalog::validate_model_menu_catalog(catalog)?;
     let config = json!({
         "catalogUrl": catalog_url,
         "catalog": catalog,
+        "allowEmptyModelList": crate::catalog::visible_slugs(catalog).is_empty(),
         "defaultModel": default_model.unwrap_or_default(),
         "modelDescription": model_description,
         "version": env!("CARGO_PKG_VERSION"),
@@ -82,6 +83,18 @@ mod tests {
         assert!(script.source().contains("catalogSource = \"inline\""));
         assert!(!script.source().contains("72216192"));
         assert_eq!(script.health_expression(), MODEL_HEALTH);
+    }
+
+    #[test]
+    fn fully_hidden_catalog_can_bootstrap_without_falling_back_to_all_models() {
+        let menu = crate::catalog::model_menu_catalog(&catalog(), &["gpt-test".into()]);
+        let script = build("http://localhost/catalog", &menu, Some("gpt-test"), "test").unwrap();
+        assert!(script.source().contains("\"allowEmptyModelList\":true"));
+        assert!(
+            script
+                .source()
+                .contains("\"agent_switch_hidden_models\":[\"gpt-test\"]")
+        );
     }
     #[test]
     fn renderer_injection_never_scans_or_patches_unrelated_app_state() {

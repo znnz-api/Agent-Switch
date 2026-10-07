@@ -1,5 +1,13 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// Managed jobs keep the existing human-readable logs without process-wide
+// stdout redirection or mutable environment variables shared between clients.
+macro_rules! println {
+    ($($arg:tt)*) => { crate::background::print_line(format_args!($($arg)*)) };
+}
+
+mod account_mode;
+mod background;
 mod backup;
 mod catalog;
 mod cdp;
@@ -13,15 +21,25 @@ mod desktop;
 mod diagnostics;
 mod gateway;
 mod gui;
+mod gui_convert;
 mod gui_layout;
+mod gui_providers;
 mod gui_settings;
+mod gui_spinner;
 mod gui_worker;
 mod helper;
 mod i18n;
 mod injection;
+mod local_gateway;
 mod network_proxy;
 mod platform;
+mod protocol;
+mod protocol_stream;
 mod runtime_state;
+mod tool_signatures;
+#[cfg(windows)]
+mod tray;
+mod usage;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -40,22 +58,22 @@ fn main() {
 
     if gui_mode {
         crate::platform::install_gui_panic_hook();
-        let _gui_mutex = match crate::platform::try_acquire_named_mutex(r"Local\znnz-client-gui-v1")
-        {
-            Ok(Some(guard)) => guard,
-            Ok(None) => {
-                let _ = crate::platform::activate_window_by_title(gui::WINDOW_TITLE);
-                return;
-            }
-            Err(error) => {
-                let message = format!(
-                    "{}: {error:#}",
-                    i18n::tr("GUI 单实例检查失败", "GUI single-instance check failed")
-                );
-                crate::platform::report_gui_startup_failure(&message);
-                std::process::exit(1);
-            }
-        };
+        let _gui_mutex =
+            match crate::platform::try_acquire_named_mutex(r"Local\Agent-Switch-gui-v1") {
+                Ok(Some(guard)) => guard,
+                Ok(None) => {
+                    let _ = crate::platform::activate_window_by_title(gui::WINDOW_TITLE);
+                    return;
+                }
+                Err(error) => {
+                    let message = format!(
+                        "{}: {error:#}",
+                        i18n::tr("GUI 单实例检查失败", "GUI single-instance check failed")
+                    );
+                    crate::platform::report_gui_startup_failure(&message);
+                    std::process::exit(1);
+                }
+            };
         if let Err(error) = gui::run() {
             let message = format!(
                 "{}: {error:#}",
@@ -199,7 +217,14 @@ async fn run_cli() -> Result<()> {
             if !no_refresh
                 && let Err(error) = config::refresh_catalog(&paths, &gateway_url, &key, false).await
             {
-                warn!("启动前刷新模型失败，将使用本地目录: {error:#}");
+                warn!(
+                    "{}: {}",
+                    i18n::tr(
+                        "启动前刷新模型失败，将使用本地目录",
+                        "Failed to refresh models before launch; using the local catalog"
+                    ),
+                    i18n::runtime_error(&error)
+                );
             }
             let result =
                 desktop::launch_and_inject(&paths, &gateway_url, &key, desktop_exe.as_deref())
@@ -262,7 +287,7 @@ async fn run_cli() -> Result<()> {
             runtime_state::run_registered(
                 client,
                 model_list_mode,
-                gui_worker::run(client, &gateway_url, key, model_list_mode),
+                gui_worker::run(client, &gateway_url, key, model_list_mode, false),
             )
             .await?;
         }
@@ -275,6 +300,30 @@ async fn run_cli() -> Result<()> {
         } => {
             let key = gui_worker::key_from_environment()?;
             gui_worker::test_gateway(&gateway_url, key, fetch_models).await?;
+        }
+        Command::InternalGatewayUpdate {
+            client,
+            gateway_url,
+        } => {
+            let key = gui_worker::key_from_environment()?;
+            gui_worker::update_gateway(client, &gateway_url, key, false).await?;
+        }
+        Command::InternalGateway => {
+            local_gateway::run_daemon().await?;
+        }
+        Command::InternalClientStatus => {
+            let processes = platform::running_client_processes()?;
+            for target in gui_worker::ClientTarget::ALL {
+                let pids = processes
+                    .iter()
+                    .filter(|(client, _)| *client == target)
+                    .map(|(_, pid)| *pid)
+                    .collect::<Vec<_>>();
+                println!(
+                    "{}",
+                    serde_json::json!({"client": target.id(), "running": !pids.is_empty(), "pids": pids})
+                );
+            }
         }
         Command::HelperTest { catalog, seconds } => {
             let value = catalog::read_catalog(&catalog)?;
@@ -293,7 +342,7 @@ fn ensure_safe_profile(paths: &ClientPaths, allow_running: bool) -> Result<()> {
         let running = platform::running_codex_processes()?;
         if !running.is_empty() {
             bail!(
-                "检测到 Codex 相关进程仍在运行: {}。为保护历史任务，写配置前请从托盘完全退出 Codex Desktop；或先用 --codex-home 指向隔离测试目录。",
+                "检测到 Codex 相关进程仍在运行: {}。为保护历史任务，写配置前请从托盘退出 Codex Desktop；或先用 --codex-home 指向隔离测试目录。",
                 running.join("、")
             );
         }

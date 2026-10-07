@@ -17,6 +17,18 @@ const LOCAL_NO_PROXY: &str = "127.0.0.1,localhost,::1";
 const NETWORK_RETRY_DELAY: Duration = Duration::from_millis(500);
 const PAC_CACHE_TTL: Duration = Duration::from_secs(60);
 
+pub fn builder_for_url(builder: ClientBuilder, target: &str) -> Result<ClientBuilder> {
+    let url = Url::parse(target)?;
+    if matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    ) {
+        Ok(builder.no_proxy())
+    } else {
+        configure_reqwest_builder(builder)
+    }
+}
+
 #[derive(Clone)]
 enum WindowsProxyConfig {
     Fixed(String),

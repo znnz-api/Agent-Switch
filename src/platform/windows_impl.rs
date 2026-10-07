@@ -9,8 +9,8 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, GetLastError, HANDLE, HWND, LPARAM,
-    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, FILETIME, GetLastError, HANDLE, HWND,
+    LPARAM, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::Security::WinTrust::{
@@ -29,18 +29,19 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::Threading::{
     CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
-    GetExitCodeProcess, OpenProcess, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW, STARTUPINFOW,
-    TerminateProcess, WaitForSingleObject,
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
     ACTIVATEOPTIONS, ApplicationActivationManager, IApplicationActivationManager,
     SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowW, GetWindowThreadProcessId, HWND_BROADCAST, MB_ICONERROR, MB_OK,
-    MessageBoxW, PostMessageW, SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE, SW_SHOWNORMAL,
-    SendMessageTimeoutW, SetForegroundWindow, ShowWindow, WM_CLOSE, WM_SETTINGCHANGE,
+    EnumWindows, FindWindowW, GetWindowThreadProcessId, HWND_BROADCAST, IsWindowVisible,
+    MB_ICONERROR, MB_OK, MessageBoxW, PostMessageW, SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE,
+    SW_SHOWNORMAL, SendMessageTimeoutW, SetForegroundWindow, ShowWindow, WM_CLOSE,
+    WM_SETTINGCHANGE,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use winreg::RegKey;
@@ -61,7 +62,7 @@ fn gui_startup_error_log_path() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("znnz-client")
+        .join("Agent-Switch")
         .join("logs")
         .join("gui-startup-error.log")
 }
@@ -85,10 +86,10 @@ pub fn report_gui_startup_failure(message: &str) {
     }
 
     let text = format!(
-        "znnz-client failed to start the GUI.\r\n\r\n{message}\r\n\r\nLog: {}",
+        "Agent-Switch failed to start the GUI.\r\n\r\n{message}\r\n\r\nLog: {}",
         log_path.display()
     );
-    let title_text = crate::i18n::tr("znnz-client 启动失败", "znnz-client startup failed");
+    let title_text = crate::i18n::tr("Agent-Switch 启动失败", "Agent-Switch startup failed");
     let title = wide_null(std::ffi::OsStr::new(title_text));
     let body = wide_null(text.as_ref());
     unsafe {
@@ -155,6 +156,12 @@ pub fn activate_window_by_title(title: &str) -> bool {
     };
     unsafe {
         let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(hwnd),
+            windows::Win32::UI::WindowsAndMessaging::WM_APP + 74,
+            WPARAM(0),
+            LPARAM(0),
+        );
         SetForegroundWindow(hwnd).as_bool()
     }
 }
@@ -274,7 +281,106 @@ pub fn running_codex_companion_processes() -> Result<Vec<String>> {
     matching_processes(is_codex_companion_name)
 }
 
-fn process_image_path(pid: u32) -> Result<String> {
+/// Read the command line with query-only access, without injecting into the client.
+fn process_command_line(pid: u32) -> Option<String> {
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtQueryInformationProcess(
+            process: HANDLE,
+            class: u32,
+            buffer: *mut std::ffi::c_void,
+            size: u32,
+            returned: *mut u32,
+        ) -> i32;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    // u64 storage provides alignment for UNICODE_STRING on both Windows targets.
+    let mut storage = vec![0u64; 16384];
+    let mut returned = 0;
+    let status = unsafe {
+        NtQueryInformationProcess(
+            handle,
+            60,
+            storage.as_mut_ptr().cast(),
+            (storage.len() * 8) as u32,
+            &mut returned,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    if status < 0 {
+        return None;
+    }
+    let value = unsafe { &*storage.as_ptr().cast::<UnicodeString>() };
+    let start = storage.as_ptr() as usize;
+    let pointer = value.buffer as usize;
+    if pointer < start
+        || pointer.checked_add(value.length as usize)? > start + storage.len() * 8
+        || value.length % 2 != 0
+    {
+        return None;
+    }
+    Some(String::from_utf16_lossy(unsafe {
+        std::slice::from_raw_parts(value.buffer, value.length as usize / 2)
+    }))
+}
+
+pub fn running_client_processes() -> Result<Vec<(crate::gui_worker::ClientTarget, u32)>> {
+    let entries = process_entries()?;
+    let mut result = Vec::new();
+    for entry in &entries {
+        let name = normalized_process_name(&entry.name);
+        if !matches!(name.as_str(), "codex" | "chatgpt" | "claude" | "node") {
+            continue;
+        }
+        let Ok(path) = process_image_path(entry.pid) else {
+            continue;
+        };
+        let command = process_command_line(entry.pid).unwrap_or_default();
+        let target = classify_client_process(&name, &path, &command);
+        if let Some(target) = target {
+            result.push((target, entry.pid));
+        }
+    }
+    Ok(result)
+}
+
+fn classify_client_process(
+    name: &str,
+    path: &str,
+    command: &str,
+) -> Option<crate::gui_worker::ClientTarget> {
+    use crate::gui_worker::ClientTarget;
+    if is_official_codex_desktop_path(path) {
+        Some(ClientTarget::CodexDesktop)
+    } else if is_official_claude_desktop_path(path) {
+        Some(ClientTarget::ClaudeDesktop)
+    } else {
+        let command = command.replace('\\', "/").to_ascii_lowercase();
+        // Desktop helpers and IDE app-server processes are not terminal sessions.
+        if path.to_ascii_lowercase().contains("\\windowsapps\\")
+            || command.contains("app-server")
+            || command.contains("--type=")
+        {
+            None
+        } else if name == "codex" || (name == "node" && command.contains("@openai/codex/")) {
+            Some(ClientTarget::CodexCli)
+        } else if name == "claude"
+            || (name == "node" && command.contains("@anthropic-ai/claude-code/"))
+        {
+            Some(ClientTarget::ClaudeCode)
+        } else {
+            None
+        }
+    }
+}
+
+pub fn process_image_path(pid: u32) -> Result<String> {
     let handle = unsafe {
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
             .with_context(|| format!("无法打开 PID {pid} 读取程序路径"))?
@@ -353,6 +459,11 @@ struct CloseWindowsContext {
 
 unsafe extern "system" fn collect_codex_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let context = unsafe { &mut *(lparam.0 as *mut CloseWindowsContext) };
+    // Electron's hidden tray/message windows must remain alive until app exit.
+    // Closing them directly can strand the process with an unresponsive tray.
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return BOOL(1);
+    }
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     let Some(name) = context.candidates.get(&pid).cloned() else {
@@ -453,13 +564,406 @@ fn codex_desktop_process_tree_from_entries(
     output
 }
 
+/// Retain kernel handles before closing windows: a recycled PID can never cause
+/// cleanup to terminate an unrelated process that started during the wait.
+struct RestartProcess {
+    pid: u32,
+    handle: HANDLE,
+}
+
+impl Drop for RestartProcess {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+impl RestartProcess {
+    fn open(pid: u32) -> Result<Self> {
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                false,
+                pid,
+            )
+        }
+        .with_context(|| format!("无法安全管理客户端进程 PID {pid}"))?;
+        Ok(Self { pid, handle })
+    }
+
+    fn image(&self) -> Result<String> {
+        let mut buffer = vec![0u16; 32768];
+        let mut length = buffer.len() as u32;
+        unsafe {
+            QueryFullProcessImageNameW(
+                self.handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        }
+        .context("无法验证客户端进程路径")?;
+        Ok(String::from_utf16_lossy(&buffer[..length as usize]))
+    }
+
+    fn running(&self) -> Result<bool> {
+        match unsafe { WaitForSingleObject(self.handle, 0) } {
+            WAIT_TIMEOUT => Ok(true),
+            WAIT_OBJECT_0 => Ok(false),
+            _ => bail!("无法检查客户端进程 PID {}", self.pid),
+        }
+    }
+
+    fn created_at(&self) -> Result<u64> {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        unsafe {
+            GetProcessTimes(
+                self.handle,
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        }
+        .context("无法验证终端进程创建时间")?;
+        Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+}
+
+// Windows process handles can be used from any thread. Keeping the original
+// handle prevents PID reuse from redirecting a later terminal close operation.
+unsafe impl Send for RestartProcess {}
+unsafe impl Sync for RestartProcess {}
+
+pub struct TerminalRestartSession {
+    root: RestartProcess,
+    target: crate::gui_worker::ClientTarget,
+}
+
+fn terminal_descendants(entries: &[ProcessEntry], root_pid: u32) -> Vec<&ProcessEntry> {
+    let mut descendants = Vec::new();
+    let mut parents = vec![root_pid];
+    while !parents.is_empty() {
+        let children: Vec<_> = entries
+            .iter()
+            .filter(|entry| {
+                parents.contains(&entry.parent_pid)
+                    && entry.pid != root_pid
+                    && !descendants
+                        .iter()
+                        .any(|old: &&ProcessEntry| old.pid == entry.pid)
+            })
+            .collect();
+        parents = children.iter().map(|entry| entry.pid).collect();
+        descendants.extend(children);
+    }
+    descendants
+}
+
+fn terminal_restart_process_matches(
+    target: crate::gui_worker::ClientTarget,
+    name: &str,
+    image: &str,
+    command: &str,
+) -> bool {
+    let console_host = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let normalized_name = normalized_process_name(name);
+    if image.eq_ignore_ascii_case(&format!(r"{console_host}\System32\conhost.exe"))
+        || image.eq_ignore_ascii_case(&format!(r"{console_host}\System32\OpenConsole.exe"))
+    {
+        return true;
+    }
+    if classify_client_process(&normalized_name, image, command) == Some(target) {
+        return true;
+    }
+    // npm/pnpm Windows shims add one cmd.exe layer before the actual Node
+    // client. It is safe to include only a shell whose command line names the
+    // recorded client; an arbitrary command typed in the terminal still falls
+    // through to the manual-restart path.
+    if normalized_name == "cmd" || normalized_name == "npm" || normalized_name == "pnpm" {
+        let command = command.replace('\\', "/").to_ascii_lowercase();
+        let client_word = match target {
+            crate::gui_worker::ClientTarget::CodexCli => "codex",
+            crate::gui_worker::ClientTarget::ClaudeCode => "claude",
+            _ => "",
+        };
+        return !client_word.is_empty()
+            && command.contains(client_word)
+            && !command.contains("powershell")
+            && !command.contains(" -command ");
+    }
+    false
+}
+
+fn is_terminal_console_host(image: &str) -> bool {
+    let console_host = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    image.eq_ignore_ascii_case(&format!(r"{console_host}\System32\conhost.exe"))
+        || image.eq_ignore_ascii_case(&format!(r"{console_host}\System32\OpenConsole.exe"))
+}
+
+impl TerminalRestartSession {
+    fn descendants<'a>(&self, entries: &'a [ProcessEntry]) -> Result<Vec<&'a ProcessEntry>> {
+        let mut created = HashMap::from([(self.root.pid, self.root.created_at()?)]);
+        let mut verified = Vec::new();
+        // Windows snapshots retain parent PIDs after the parent has exited.
+        // A recycled parent PID must not make an unrelated older process ours.
+        for entry in terminal_descendants(entries, self.root.pid) {
+            let Some(parent_created) = created.get(&entry.parent_pid).copied() else {
+                continue;
+            };
+            let process = match RestartProcess::open(entry.pid) {
+                Ok(process) => process,
+                Err(_) if running_any_process_ids(&[entry.pid])?.is_empty() => continue,
+                Err(error) => return Err(error),
+            };
+            if !process.running()? {
+                continue;
+            }
+            let child_created = process.created_at()?;
+            if child_created >= parent_created {
+                created.insert(entry.pid, child_created);
+                verified.push(entry);
+            }
+        }
+        Ok(verified)
+    }
+
+    pub fn record(pid: u32, target: crate::gui_worker::ClientTarget) -> Result<Self> {
+        if !matches!(
+            target,
+            crate::gui_worker::ClientTarget::CodexCli | crate::gui_worker::ClientTarget::ClaudeCode
+        ) {
+            bail!("拒绝记录非终端客户端");
+        }
+        let root = RestartProcess::open(pid)?;
+        if !root.image()?.eq_ignore_ascii_case(
+            &std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()),
+        ) {
+            bail!("终端会话身份无效");
+        }
+        Ok(Self { root, target })
+    }
+
+    pub fn close(&self) -> Result<()> {
+        if !self.root.running()? {
+            return Ok(());
+        }
+        for _ in 0..3 {
+            let entries = process_entries()?;
+            let descendants = self.descendants(&entries)?;
+            let mut processes = Vec::new();
+            // Acquire and validate all handles before closing anything. Active user
+            // commands and other client sessions require a manual restart.
+            for entry in descendants.iter().rev() {
+                let process = match RestartProcess::open(entry.pid) {
+                    Ok(process) => process,
+                    Err(error) if running_any_process_ids(&[entry.pid])?.is_empty() => {
+                        let _ = error;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                if !process.running()? {
+                    continue;
+                }
+                let image = process.image()?;
+                let command = process_command_line(entry.pid).unwrap_or_default();
+                if !terminal_restart_process_matches(self.target, &entry.name, &image, &command) {
+                    bail!(
+                        "{} ({image})",
+                        crate::i18n::tr(
+                            "终端中有其他子程序运行，请手动重启",
+                            "Other programs are running in the terminal; restart it manually"
+                        )
+                    );
+                }
+                if !is_terminal_console_host(&image) {
+                    processes.push(process);
+                }
+            }
+            // A tool started while handles were being checked also requires a manual restart.
+            if self
+                .descendants(&process_entries()?)?
+                .iter()
+                .filter(|entry| {
+                    process_image_path(entry.pid)
+                        .map(|image| !is_terminal_console_host(&image))
+                        .unwrap_or(true)
+                })
+                .any(|entry| !processes.iter().any(|process| process.pid == entry.pid))
+            {
+                // Windows may still be creating its console host. Revalidate every
+                // new process before retrying; an unknown child still aborts above.
+                continue;
+            }
+            for process in processes.iter().chain(std::iter::once(&self.root)) {
+                if process.running()? {
+                    unsafe { TerminateProcess(process.handle, 0) }
+                        .context("无法结束已记录的终端客户端")?;
+                    if unsafe { WaitForSingleObject(process.handle, 5000) } != WAIT_OBJECT_0 {
+                        bail!("终端客户端未完整退出");
+                    }
+                }
+            }
+            return Ok(());
+        }
+        bail!(
+            "{}",
+            crate::i18n::tr(
+                "终端进程已变化，请手动重启",
+                "Terminal processes changed; restart it manually"
+            )
+        )
+    }
+
+    pub fn verify_client_sessions(&self) -> Result<()> {
+        let entries = process_entries()?;
+        let descendants = if self.root.running()? {
+            self.descendants(&entries)?
+        } else {
+            Vec::new()
+        };
+        if running_client_processes()?.iter().any(|(target, pid)| {
+            *target == self.target && !descendants.iter().any(|entry| entry.pid == *pid)
+        }) {
+            bail!(
+                "{}",
+                crate::i18n::tr(
+                    "仍有其他终端会话运行",
+                    "Other terminal sessions are still running"
+                )
+            );
+        }
+        Ok(())
+    }
+}
+
+pub struct DesktopRestartSession {
+    target: crate::gui_worker::ClientTarget,
+    processes: Vec<RestartProcess>,
+}
+
+fn desktop_image_matches(target: crate::gui_worker::ClientTarget, path: &str) -> bool {
+    use crate::gui_worker::ClientTarget;
+    match target {
+        ClientTarget::CodexDesktop => is_official_codex_desktop_path(path),
+        ClientTarget::ClaudeDesktop => is_official_claude_desktop_path(path),
+        _ => false,
+    }
+}
+
+impl DesktopRestartSession {
+    pub fn begin(target: crate::gui_worker::ClientTarget) -> Result<Self> {
+        use crate::gui_worker::ClientTarget;
+        let pids = match target {
+            ClientTarget::CodexDesktop => running_codex_desktop_process_ids()?,
+            ClientTarget::ClaudeDesktop => running_claude_desktop_process_ids()?,
+            _ => bail!("终端会话不能通过桌面重启流程关闭"),
+        };
+        let mut processes = Vec::new();
+        for pid in pids {
+            let process = match RestartProcess::open(pid) {
+                Ok(process) => process,
+                Err(error) => {
+                    if running_any_process_ids(&[pid])?.is_empty() {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            if !process.running()? {
+                continue;
+            }
+            if !desktop_image_matches(target, &process.image()?) {
+                bail!("客户端进程身份已变化，取消自动重启");
+            }
+            processes.push(process);
+        }
+        let session = Self { target, processes };
+        // Acquire every handle before sending any close message. If access is
+        // denied, leave the UI and tray untouched and request a manual restart.
+        let context = session.visible_windows()?;
+        for hwnd in context.windows {
+            unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                .context("无法发送客户端窗口关闭请求")?;
+        }
+        Ok(session)
+    }
+
+    fn visible_windows(&self) -> Result<CloseWindowsContext> {
+        let mut context = CloseWindowsContext {
+            candidates: self
+                .processes
+                .iter()
+                .filter_map(|process| match process.running() {
+                    Ok(false) => None,
+                    _ => Some((process.pid, self.target.title().to_owned())),
+                })
+                .collect(),
+            matched: HashMap::new(),
+            windows: Vec::new(),
+        };
+        unsafe {
+            EnumWindows(
+                Some(collect_codex_window),
+                LPARAM((&mut context as *mut CloseWindowsContext) as isize),
+            )
+        }
+        .context("无法检查客户端窗口是否已关闭")?;
+        Ok(context)
+    }
+
+    pub fn has_visible_windows(&self) -> Result<bool> {
+        Ok(!self.visible_windows()?.windows.is_empty())
+    }
+
+    pub fn running(&self) -> Result<bool> {
+        for process in &self.processes {
+            if process.running()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn terminate_background(&self) -> Result<()> {
+        if self.has_visible_windows()? {
+            bail!("客户端窗口仍打开，已保留进程，请手动重启");
+        }
+        for process in &self.processes {
+            if process.running()? {
+                // Recheck before every termination, including close-cancel and
+                // confirmation dialogs that appeared during the grace period.
+                if self.has_visible_windows()? {
+                    bail!("客户端重新显示窗口，已停止后台清理");
+                }
+                if let Err(error) = unsafe { TerminateProcess(process.handle, 0) }
+                    && process.running()?
+                {
+                    return Err(error)
+                        .with_context(|| format!("无法清理客户端后台 PID {}", process.pid));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 先记录官方 Codex/ChatGPT Desktop 的窗口和同一官方进程树，再发送 WM_CLOSE。
 /// 进程树记录发生在关闭请求之前，避免 Electron 窗口进程先退出后丢失父子关系。
 pub fn request_codex_desktop_close() -> Result<CodexDesktopCloseResult> {
     let entries = process_entries()?;
     let candidates = entries
         .iter()
-        .filter(|entry| is_official_desktop_name(&entry.name))
+        .filter(|entry| {
+            is_official_desktop_name(&entry.name)
+                && process_image_path(entry.pid)
+                    .is_ok_and(|path| is_official_codex_desktop_path(&path))
+        })
         .map(|entry| (entry.pid, entry.name.clone()))
         .collect::<HashMap<_, _>>();
     if candidates.is_empty() {
@@ -734,7 +1238,17 @@ fn launch_terminal_client_with_environment_and_directory(
     // GUI worker 没有控制台，它的 stdin/stdout 指向空设备或日志文件。
     // std::process::Command 会把这些句柄继续传给新进程，即使指定 CREATE_NEW_CONSOLE，
     // 交互式 CLI 仍会判断 stdin 不是 TTY。这里直接调用 CreateProcessW，并且不继承句柄。
-    let command_line = build_terminal_command_line(&cmd_exe, title, &executable, environment)?;
+    // Codex refuses to start its shared Windows daemon from an elevated
+    // terminal. Agent-Switch may itself be elevated, so always use the
+    // daemon-free mode for the isolated Codex CLI profile. Claude Code keeps
+    // its normal invocation.
+    let arguments = if command == "codex" {
+        ["--no-daemon"].as_slice()
+    } else {
+        &[]
+    };
+    let command_line =
+        build_terminal_command_line(&cmd_exe, title, &executable, environment, arguments)?;
     let environment_block = if environment.is_empty() {
         None
     } else {
@@ -1143,6 +1657,7 @@ fn build_terminal_command_line(
     title: &str,
     executable: &Path,
     environment: &[(&str, &str)],
+    arguments: &[&str],
 ) -> Result<String> {
     let mut setup = Vec::new();
     for (name, value) in environment {
@@ -1163,17 +1678,45 @@ fn build_terminal_command_line(
     } else {
         format!("{} & ", setup.join(" & "))
     };
+    let arguments = arguments
+        .iter()
+        .map(|argument| {
+            if argument.contains(['\0', '\r', '\n', '"']) {
+                Err(anyhow::anyhow!(
+                    "terminal argument contains unsupported characters"
+                ))
+            } else {
+                Ok(format!(" \"{}\"", argument.replace('%', "%%")))
+            }
+        })
+        .collect::<Result<String>>()?;
     Ok(format!(
-        "\"{}\" /D /K title {} & {}call \"{}\"",
+        "\"{}\" /D /K title {} & {}call \"{}\"{}",
         cmd_exe.display(),
         title,
         setup,
-        executable.display()
+        executable.display(),
+        arguments,
     ))
 }
 
 fn build_environment_block(overrides: &[(&str, &str)]) -> Result<Vec<u16>> {
     let mut entries = std::env::vars_os().collect::<Vec<(OsString, OsString)>>();
+    if crate::background::is_managed() {
+        // Match the previous worker-process boundary: unrelated parent keys must
+        // not override the local credentials applied for this particular client.
+        entries.retain(|(name, _)| {
+            !matches!(
+                name.to_string_lossy().to_ascii_uppercase().as_str(),
+                "ZNNZ_API_KEY"
+                    | "LITEAPI_API_KEY"
+                    | "ANTHROPIC_AUTH_TOKEN"
+                    | "OPENAI_API_KEY"
+                    | "OPENAI_BASE_URL"
+                    | "ANTHROPIC_API_KEY"
+            )
+        });
+    }
     for (name, value) in overrides {
         if name.is_empty() || name.contains('=') || name.contains('\0') {
             bail!("无效的终端环境变量名称: {name:?}");
@@ -1387,6 +1930,296 @@ fn _types() -> (HWND, PCWSTR) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn terminal_restart_preserves_unrelated_processes_and_rejects_active_tools() {
+        use std::process::Stdio;
+        use std::time::Duration;
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let cmd =
+            std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+        let spawn = |arguments: &[&str]| {
+            ChildGuard(
+                std::process::Command::new(&cmd)
+                    .args(arguments)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .creation_flags(CREATE_NO_WINDOW_FLAG)
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        let mut owned = spawn(&["/D", "/Q", "/K"]);
+        let unrelated = spawn(&["/D", "/Q", "/K"]);
+        let session =
+            TerminalRestartSession::record(owned.0.id(), crate::gui_worker::ClientTarget::CodexCli)
+                .unwrap();
+        session.close().unwrap();
+        owned.0.wait().unwrap();
+        session.close().unwrap();
+        assert!(
+            RestartProcess::open(unrelated.0.id())
+                .unwrap()
+                .running()
+                .unwrap()
+        );
+
+        let active = spawn(&[
+            "/D",
+            "/Q",
+            "/K",
+            "powershell.exe -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 60\"",
+        ]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let child_pid = loop {
+            let entries = process_entries().unwrap();
+            if let Some(entry) = terminal_descendants(&entries, active.0.id())
+                .into_iter()
+                .find(|entry| normalized_process_name(&entry.name) == "powershell")
+            {
+                break entry.pid;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Keep a handle for fixture cleanup even if an assertion fails.
+        struct ProcessGuard(RestartProcess);
+        impl Drop for ProcessGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = TerminateProcess(self.0.handle, 0);
+                }
+            }
+        }
+        let child = ProcessGuard(RestartProcess::open(child_pid).unwrap());
+        let session = TerminalRestartSession::record(
+            active.0.id(),
+            crate::gui_worker::ClientTarget::ClaudeCode,
+        )
+        .unwrap();
+        assert!(session.close().is_err());
+        assert!(session.root.running().unwrap());
+        assert!(child.0.running().unwrap());
+    }
+
+    #[test]
+    fn terminal_restart_tree_and_process_identity_exclude_unrelated_commands() {
+        use crate::gui_worker::ClientTarget::*;
+        let entries = vec![
+            entry(10, 1, "cmd.exe"),
+            entry(11, 10, "node.exe"),
+            entry(12, 11, "codex.exe"),
+            entry(20, 1, "cmd.exe"),
+        ];
+        assert_eq!(
+            terminal_descendants(&entries, 10)
+                .iter()
+                .map(|entry| entry.pid)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+        assert!(terminal_restart_process_matches(
+            CodexCli,
+            "node.exe",
+            r"C:\node\node.exe",
+            r"node.exe C:\npm\node_modules\@openai\codex\bin\codex.js"
+        ));
+        assert!(!terminal_restart_process_matches(
+            CodexCli,
+            "node.exe",
+            r"C:\node\node.exe",
+            "node.exe user-tool.js"
+        ));
+        assert!(!terminal_restart_process_matches(
+            CodexCli,
+            "claude.exe",
+            r"C:\tools\claude.exe",
+            "claude.exe"
+        ));
+        assert!(!terminal_restart_process_matches(
+            ClaudeCode,
+            "conhost.exe",
+            r"C:\other\conhost.exe",
+            "conhost.exe"
+        ));
+    }
+
+    #[test]
+    fn restart_closes_visible_windows_but_preserves_hidden_tray_windows() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPED, WS_VISIBLE,
+        };
+        use windows::core::w;
+        // STATIC is a system class; no message pump or registered class is needed.
+        // Both windows are owned by this test thread and destroyed below.
+        let hidden = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("restart-hidden-fixture"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let visible = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("restart-visible-fixture"),
+                WS_OVERLAPPED | WS_VISIBLE,
+                -30000,
+                -30000,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let mut context = CloseWindowsContext {
+            candidates: HashMap::from([(std::process::id(), "fixture".to_owned())]),
+            matched: HashMap::new(),
+            windows: Vec::new(),
+        };
+        unsafe {
+            let _ = collect_codex_window(
+                hidden,
+                LPARAM((&mut context as *mut CloseWindowsContext) as isize),
+            );
+            let _ = collect_codex_window(
+                visible,
+                LPARAM((&mut context as *mut CloseWindowsContext) as isize),
+            );
+            DestroyWindow(hidden).unwrap();
+            DestroyWindow(visible).unwrap();
+        }
+        assert_eq!(context.windows, vec![visible]);
+    }
+
+    #[test]
+    fn restart_cleanup_waits_on_original_handle_and_leaves_other_processes_alone() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let spawn = || {
+            ChildGuard(
+                std::process::Command::new("powershell.exe")
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Start-Sleep -Seconds 60",
+                    ])
+                    .creation_flags(CREATE_NO_WINDOW_FLAG)
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        let mut owned = spawn();
+        let unrelated = spawn();
+        let process = RestartProcess::open(owned.0.id()).unwrap();
+        let unrelated_process = RestartProcess::open(unrelated.0.id()).unwrap();
+        assert!(process.running().unwrap());
+        assert!(!desktop_image_matches(
+            crate::gui_worker::ClientTarget::CodexDesktop,
+            &process.image().unwrap()
+        ));
+        let session = DesktopRestartSession {
+            target: crate::gui_worker::ClientTarget::CodexDesktop,
+            processes: vec![process],
+        };
+        assert!(!session.has_visible_windows().unwrap());
+        session.terminate_background().unwrap();
+        owned.0.wait().unwrap();
+        assert!(!session.running().unwrap());
+        // A completed session must not act on any later process reusing its PID.
+        session.terminate_background().unwrap();
+        assert!(unrelated_process.running().unwrap());
+    }
+
+    #[test]
+    fn process_detection_distinguishes_terminal_sessions_from_desktop_helpers() {
+        use crate::gui_worker::ClientTarget::*;
+        assert_eq!(
+            classify_client_process(
+                "chatgpt",
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_1_x64\app\ChatGPT.exe",
+                "ChatGPT.exe"
+            ),
+            Some(CodexDesktop)
+        );
+        assert_eq!(
+            classify_client_process(
+                "claude",
+                r"C:\Program Files\WindowsApps\Claude_1_x64\app\claude.exe",
+                "claude.exe"
+            ),
+            Some(ClaudeDesktop)
+        );
+        assert_eq!(
+            classify_client_process("codex", r"C:\tools\codex.exe", "codex.exe"),
+            Some(CodexCli)
+        );
+        assert_eq!(
+            classify_client_process("claude", r"C:\tools\claude.exe", "claude.exe"),
+            Some(ClaudeCode)
+        );
+        assert_eq!(
+            classify_client_process(
+                "node",
+                r"C:\node\node.exe",
+                r#"node.exe "C:\npm\node_modules\@openai\codex\bin\codex.js""#
+            ),
+            Some(CodexCli)
+        );
+        assert_eq!(
+            classify_client_process(
+                "node",
+                r"C:\node\node.exe",
+                r#"node.exe "C:\npm\node_modules\@anthropic-ai\claude-code\cli.js""#
+            ),
+            Some(ClaudeCode)
+        );
+        assert_eq!(
+            classify_client_process(
+                "codex",
+                r"C:\OpenAI\Codex\bin\codex.exe",
+                "codex.exe app-server --stdio"
+            ),
+            None
+        );
+        assert_eq!(
+            classify_client_process("node", r"C:\node\node.exe", "node.exe unrelated.js"),
+            None
+        );
+    }
+
+    #[test]
+    fn command_line_query_works_with_query_only_access() {
+        let command = process_command_line(std::process::id()).unwrap();
+        assert!(command.to_ascii_lowercase().contains("znnz_agent_launcher"));
+    }
+
     fn entry(pid: u32, parent_pid: u32, name: &str) -> ProcessEntry {
         ProcessEntry {
             pid,
@@ -1493,11 +2326,12 @@ mod tests {
             "znnz.net - Codex CLI",
             Path::new(r"C:\Program Files\Codex CLI\codex.cmd"),
             &[("CODEX_HOME", r"C:\isolated profile\codex-cli")],
+            &["--no-daemon"],
         )
         .unwrap();
 
         assert!(command.contains(r#"set "CODEX_HOME=C:\isolated profile\codex-cli" & call"#));
-        assert!(command.ends_with(r#"call "C:\Program Files\Codex CLI\codex.cmd""#));
+        assert!(command.ends_with(r#"call "C:\Program Files\Codex CLI\codex.cmd" "--no-daemon""#));
     }
 
     #[test]

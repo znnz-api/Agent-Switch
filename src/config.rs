@@ -131,6 +131,9 @@ fn merge_codex_config(
     let gateway = GatewayIdentity::parse(gateway_url)?;
     doc["model_provider"] = value(provider_id);
     doc["model"] = value(default_model);
+    // Gateway mode must use the local API credential, never a cached OAuth
+    // login from the OS keyring. The account-mode snapshot restores this field.
+    doc["cli_auth_credentials_store"] = value("file");
     if pin_model_catalog {
         doc["model_catalog_json"] = value(catalog_path.to_string_lossy().replace('\\', "/"));
     } else {
@@ -187,6 +190,9 @@ fn merge_codex_config(
     Ok(format!("{}\n", doc.to_string().trim_end()))
 }
 fn merge_codex_auth(mut object: Map<String, Value>, api_key: &str) -> Value {
+    object.remove("tokens");
+    object.remove("last_refresh");
+    object.insert("auth_mode".to_owned(), Value::String("apikey".to_owned()));
     object.insert(
         "OPENAI_API_KEY".to_owned(),
         Value::String(api_key.to_owned()),
@@ -220,7 +226,8 @@ fn merge_claude_settings(
     // Do not force a concrete model on startup. Removing a stale value also
     // makes Claude Code use its own `Default (recommended)` entry.
     object.remove("model");
-    let source_label = gateway.source_label();
+    let source_label =
+        catalog_source_label(gateway_catalog).unwrap_or_else(|| gateway.source_label());
     if use_gateway_model_list {
         let menu = DesktopModelMenu::claude_code_catalog(gateway_catalog, &source_label)?;
         object.insert("modelPicker".to_owned(), menu.claude_code_model_picker());
@@ -321,6 +328,22 @@ fn merge_claude_settings(
         }
     }
     Ok(Value::Object(object))
+}
+
+fn catalog_source_label(catalog: &Value) -> Option<String> {
+    catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models.iter().find_map(|model| {
+                model
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|description| description.starts_with("From "))
+                    .map(ToOwned::to_owned)
+            })
+        })
 }
 
 fn merge_claude_state(mut object: Map<String, Value>) -> Value {
@@ -458,7 +481,11 @@ fn annotate_codex_bundled_catalog_sources(
     let gateway_models = catalog::visible_slugs(gateway_catalog)
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let source_label = GatewayIdentity::parse(gateway_url)?.source_label();
+    let source_label = catalog_source_label(gateway_catalog).unwrap_or_else(|| {
+        GatewayIdentity::parse(gateway_url)
+            .map(|gateway| gateway.source_label())
+            .unwrap_or_default()
+    });
     let models = bundled_catalog
         .get_mut("models")
         .and_then(Value::as_array_mut)
@@ -555,7 +582,7 @@ impl ClientPaths {
         let base = BaseDirs::new()
             .context("Unable to locate the current user's local application data directory")?
             .data_local_dir()
-            .join("znnz-client")
+            .join("Agent-Switch")
             .join("profiles")
             .join("codex-cli");
         Self::discover(Some(base), None)
@@ -656,11 +683,22 @@ fn apply_files(files: Vec<(PathBuf, Vec<u8>)>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn install_codex_with_model_list(
     paths: &ClientPaths,
     options: &InstallOptions,
     api_key: &str,
     use_gateway_model_list: bool,
+) -> Result<()> {
+    install_codex_with_hidden_models(paths, options, api_key, use_gateway_model_list, &[]).await
+}
+
+pub async fn install_codex_with_hidden_models(
+    paths: &ClientPaths,
+    options: &InstallOptions,
+    api_key: &str,
+    use_gateway_model_list: bool,
+    hidden_models: &[String],
 ) -> Result<()> {
     let gateway = fetch_gateway_catalog(options, api_key).await?;
     if options.dry_run {
@@ -669,7 +707,7 @@ pub async fn install_codex_with_model_list(
     let config = parse_toml_or_empty(&read_optional(&paths.codex_config)?, &paths.codex_config)?;
     let provider = choose_provider_id(&config, &paths.codex_sessions);
     install_backup_files(paths, false)?;
-    let files = merged_codex_files(
+    let mut files = merged_codex_files(
         paths,
         options,
         api_key,
@@ -678,14 +716,32 @@ pub async fn install_codex_with_model_list(
         false,
         use_gateway_model_list,
     )?;
-    apply_files(files)
+    if use_gateway_model_list {
+        replace_model_menu_file(&mut files, &paths.codex_catalog, &gateway, hidden_models)?;
+    }
+    crate::account_mode::apply_gateway_files(
+        paths,
+        crate::gui_worker::ClientTarget::CodexDesktop,
+        files,
+    )
 }
 
+#[cfg(test)]
 pub async fn install_codex_cli_with_model_list(
     paths: &ClientPaths,
     options: &InstallOptions,
     api_key: &str,
     use_gateway_model_list: bool,
+) -> Result<()> {
+    install_codex_cli_with_hidden_models(paths, options, api_key, use_gateway_model_list, &[]).await
+}
+
+pub async fn install_codex_cli_with_hidden_models(
+    paths: &ClientPaths,
+    options: &InstallOptions,
+    api_key: &str,
+    use_gateway_model_list: bool,
+    hidden_models: &[String],
 ) -> Result<()> {
     let gateway = fetch_gateway_catalog(options, api_key).await?;
     if options.dry_run {
@@ -698,7 +754,7 @@ pub async fn install_codex_cli_with_model_list(
         use_gateway_model_list,
     )?;
     install_backup_files(paths, false)?;
-    let files = merged_codex_files(
+    let mut files = merged_codex_files(
         paths,
         options,
         api_key,
@@ -707,14 +763,51 @@ pub async fn install_codex_cli_with_model_list(
         true,
         true,
     )?;
-    apply_files(files)
+    if use_gateway_model_list {
+        replace_model_menu_file(
+            &mut files,
+            &paths.codex_catalog,
+            &selected_catalog,
+            hidden_models,
+        )?;
+    }
+    crate::account_mode::apply_gateway_files(
+        paths,
+        crate::gui_worker::ClientTarget::CodexCli,
+        files,
+    )
 }
 
+fn replace_model_menu_file(
+    files: &mut [(PathBuf, Vec<u8>)],
+    path: &std::path::Path,
+    catalog_value: &Value,
+    hidden_models: &[String],
+) -> Result<()> {
+    let menu = catalog::model_menu_catalog(catalog_value, hidden_models);
+    if let Some((_, bytes)) = files.iter_mut().find(|(candidate, _)| candidate == path) {
+        *bytes = pretty_json(&menu)?.into_bytes();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub async fn install_claude_code_with_model_list(
     paths: &ClientPaths,
     options: &InstallOptions,
     api_key: &str,
     use_gateway_model_list: bool,
+) -> Result<Value> {
+    install_claude_code_with_hidden_models(paths, options, api_key, use_gateway_model_list, &[])
+        .await
+}
+
+pub async fn install_claude_code_with_hidden_models(
+    paths: &ClientPaths,
+    options: &InstallOptions,
+    api_key: &str,
+    use_gateway_model_list: bool,
+    hidden_models: &[String],
 ) -> Result<Value> {
     let gateway = fetch_gateway_catalog(options, api_key).await?;
     if options.dry_run {
@@ -726,34 +819,98 @@ pub async fn install_claude_code_with_model_list(
         select_claude_code_model_slots(&gateway)?
     };
     install_backup_files(paths, true)?;
-    let settings = merge_claude_settings(
+    let mut settings = merge_claude_settings(
         read_json_object(&paths.claude_settings, "Claude settings.json")?,
         &options.gateway_url,
         use_gateway_model_list,
         &slots,
         &gateway,
     )?;
+    if use_gateway_model_list {
+        let menu = DesktopModelMenu::claude_code_catalog(
+            &gateway,
+            catalog_source_label(&gateway).unwrap_or_else(|| {
+                GatewayIdentity::parse(&options.gateway_url)
+                    .map(|gateway| gateway.source_label())
+                    .unwrap_or_default()
+            }),
+        )?
+        .with_hidden_models(hidden_models);
+        settings["modelPicker"] = menu.claude_code_model_picker();
+        if !hidden_models.is_empty() {
+            // Discovery must not repopulate the curated picker from the full proxy catalog.
+            settings["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = json!("0");
+        }
+    }
     let state = merge_claude_state(read_json_object(&paths.claude_state, "Claude state")?);
     let cache = if use_gateway_model_list {
-        gateway.clone()
+        catalog::model_menu_catalog(&gateway, hidden_models)
     } else {
         json!({"models": []})
     };
-    apply_files(vec![
-        (
-            paths.claude_settings.clone(),
-            pretty_json(&settings)?.into_bytes(),
-        ),
-        (
-            paths.claude_state.clone(),
-            pretty_json(&state)?.into_bytes(),
-        ),
-        (
-            paths.claude_model_cache.clone(),
-            pretty_json(&cache)?.into_bytes(),
-        ),
-    ])?;
+    crate::account_mode::apply_gateway_files(
+        paths,
+        crate::gui_worker::ClientTarget::ClaudeCode,
+        vec![
+            (
+                paths.claude_settings.clone(),
+                pretty_json(&settings)?.into_bytes(),
+            ),
+            (
+                paths.claude_state.clone(),
+                pretty_json(&state)?.into_bytes(),
+            ),
+            (
+                paths.claude_model_cache.clone(),
+                pretty_json(&cache)?.into_bytes(),
+            ),
+        ],
+    )?;
     Ok(gateway)
+}
+
+/// Persist only the loopback credential. Reopening Claude Code from another
+/// terminal must not depend on the environment of the original launcher shell.
+pub fn save_claude_runtime_endpoint(paths: &ClientPaths, url: &str, token: &str) -> Result<()> {
+    let mut settings = read_json_object(&paths.claude_settings, "Claude settings.json")?;
+    let env = settings
+        .entry("env")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("Claude settings.json 的 env 不是 JSON 对象")?;
+    for (name, value) in [
+        ("ANTHROPIC_BASE_URL", url),
+        ("ANTHROPIC_AUTH_TOKEN", token),
+        ("CLAUDE_GATEWAY_ALLOW_LOOPBACK", "1"),
+    ] {
+        env.insert(name.to_owned(), Value::String(value.to_owned()));
+    }
+    let no_proxy = env
+        .get("NO_PROXY")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| std::env::var("NO_PROXY").ok())
+        .unwrap_or_default();
+    let mut bypass = no_proxy
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for local in ["127.0.0.1", "localhost", "::1"] {
+        if !bypass.iter().any(|value| value.eq_ignore_ascii_case(local)) {
+            bypass.push(local.to_owned());
+        }
+    }
+    env.insert("NO_PROXY".into(), Value::String(bypass.join(",")));
+    crate::account_mode::apply_gateway_files(
+        paths,
+        crate::gui_worker::ClientTarget::ClaudeCode,
+        vec![(
+            paths.claude_settings.clone(),
+            pretty_json(&Value::Object(settings))?.into_bytes(),
+        )],
+    )
 }
 
 pub async fn install(paths: &ClientPaths, options: &InstallOptions, api_key: &str) -> Result<()> {
@@ -868,6 +1025,47 @@ mod tests {
             claude_model_cache: claude_home.join("cache/gateway-models.json"),
             claude_home,
         }
+    }
+
+    #[test]
+    fn claude_reopen_settings_keep_picker_and_save_only_local_credentials() {
+        let root = test_root("claude-reopen");
+        let paths = test_paths(&root);
+        backup::atomic_write(
+            &paths.claude_settings,
+            br#"{"modelPicker":{"options":["a"]},"env":{"KEEP":"yes"},"unrelated":true}"#,
+        )
+        .unwrap();
+        save_claude_runtime_endpoint(&paths, "http://127.0.0.1:12345", "local-only-token").unwrap();
+        let settings: Value =
+            serde_json::from_slice(&fs::read(&paths.claude_settings).unwrap()).unwrap();
+        assert_eq!(settings.pointer("/modelPicker/options/0").unwrap(), "a");
+        assert_eq!(settings.pointer("/env/KEEP").unwrap(), "yes");
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_BASE_URL").unwrap(),
+            "http://127.0.0.1:12345"
+        );
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_AUTH_TOKEN").unwrap(),
+            "local-only-token"
+        );
+        assert_eq!(settings["unrelated"], true);
+        remove_test_root(&root);
+    }
+
+    #[test]
+    fn gateway_auth_explicitly_selects_api_key_and_does_not_mix_oauth_tokens() {
+        let account = serde_json::from_value(
+            json!({"auth_mode":"chatgpt", "tokens":{"refresh_token":"private"},
+            "last_refresh":"old", "unrelated":true}),
+        )
+        .unwrap();
+        let auth = merge_codex_auth(account, "local-gateway-token");
+        assert_eq!(auth["auth_mode"], "apikey");
+        assert_eq!(auth["OPENAI_API_KEY"], "local-gateway-token");
+        assert!(auth.get("tokens").is_none());
+        assert!(auth.get("last_refresh").is_none());
+        assert_eq!(auth["unrelated"], true);
     }
 
     fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -1392,7 +1590,7 @@ openai_base_url = "https://old.invalid"
         assert!(
             paths
                 .codex_home
-                .ends_with(Path::new("znnz-client/profiles/codex-cli"))
+                .ends_with(Path::new("Agent-Switch/profiles/codex-cli"))
         );
         assert_ne!(paths.codex_home, ClientPaths::default_codex_home().unwrap());
         assert_eq!(paths.codex_config, paths.codex_home.join("config.toml"));
@@ -1504,6 +1702,63 @@ openai_base_url = "https://old.invalid"
             default_model: Some("gpt-test".into()),
             dry_run: false,
             set_user_environment: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn hidden_models_only_change_client_menus_and_can_be_restored_on_next_config() {
+        for target in ["codex-cli", "codex-desktop", "claude-code"] {
+            let root = test_root(&format!("hidden-menu-{target}"));
+            let paths = test_paths(&root);
+            for hidden in [vec!["gpt-test".to_owned()], Vec::new()] {
+                let (url, server) = start_catalog_server();
+                let options = scoped_options(url);
+                match target {
+                    "codex-cli" => install_codex_cli_with_hidden_models(
+                        &paths, &options, "test-key", true, &hidden,
+                    )
+                    .await
+                    .unwrap(),
+                    "codex-desktop" => install_codex_with_hidden_models(
+                        &paths, &options, "test-key", true, &hidden,
+                    )
+                    .await
+                    .unwrap(),
+                    _ => {
+                        let upstream = install_claude_code_with_hidden_models(
+                            &paths, &options, "test-key", true, &hidden,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(catalog::visible_slugs(&upstream), vec!["gpt-test"]);
+                        let settings: Value =
+                            serde_json::from_slice(&fs::read(&paths.claude_settings).unwrap())
+                                .unwrap();
+                        assert_eq!(
+                            settings["modelPicker"]["options"].as_array().unwrap().len(),
+                            usize::from(hidden.is_empty())
+                        );
+                        assert_eq!(
+                            settings["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"],
+                            if hidden.is_empty() { "1" } else { "0" }
+                        );
+                    }
+                }
+                server.join().unwrap();
+                let path = if target == "claude-code" {
+                    &paths.claude_model_cache
+                } else {
+                    &paths.codex_catalog
+                };
+                let menu = catalog::read_model_menu_catalog(path).unwrap();
+                assert_eq!(
+                    catalog::visible_slugs(&menu).len(),
+                    usize::from(hidden.is_empty())
+                );
+                assert_eq!(menu["models"].as_array().unwrap().len(), 1);
+                assert_eq!(menu["models"][0]["supported_in_api"], true);
+            }
+            remove_test_root(&root);
         }
     }
 

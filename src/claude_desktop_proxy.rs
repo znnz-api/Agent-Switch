@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tracing::instrument::WithSubscriber;
 use tracing::{info, warn};
 use url::Url;
 use zeroize::Zeroize;
@@ -199,6 +200,15 @@ impl DesktopModelMenu {
 
     pub fn mode(&self) -> ClaudeDesktopModelMode {
         self.mode
+    }
+
+    pub fn with_hidden_models(&self, hidden_models: &[String]) -> Self {
+        let mut menu = self.clone();
+        if menu.mode == ClaudeDesktopModelMode::FullCatalog {
+            menu.models
+                .retain(|model| !hidden_models.contains(&model.upstream_name));
+        }
+        menu
     }
 
     pub fn model_count(&self) -> usize {
@@ -551,7 +561,7 @@ impl ClaudeDesktopProxy {
         if !address.ip().is_loopback() {
             bail!("安全检查失败：Claude Desktop 代理没有绑定到回环地址");
         }
-        let client = network_proxy::configure_reqwest_builder(Client::builder())?
+        let client = network_proxy::builder_for_url(Client::builder(), gateway_url)?
             .connect_timeout(Duration::from_secs(12))
             .pool_idle_timeout(Duration::from_secs(30))
             .user_agent(format!(
@@ -600,7 +610,7 @@ impl ClaudeDesktopProxy {
                                             warn!("Claude Desktop proxy connection failed: {error}");
                                         }
                                     }
-                                });
+                                }.with_current_subscriber());
                             }
                             Ok((_stream, peer)) => {
                                 if i18n::language() == i18n::Language::ZhCn {
@@ -621,7 +631,7 @@ impl ClaudeDesktopProxy {
                     }
                 }
             }
-        });
+        }.with_current_subscriber());
         Ok(Self {
             address,
             state,
@@ -772,6 +782,7 @@ async fn forward_request(
     request: Request<Incoming>,
     state: &ProxyState,
 ) -> Result<Response<ProxyBody>> {
+    let active = crate::local_gateway::track_adapter_request(&state.gateway);
     let request_id = state.request_sequence.fetch_add(1, Ordering::Relaxed);
     let started = Instant::now();
     let (parts, body) = request.into_parts();
@@ -827,6 +838,8 @@ async fn forward_request(
         upstream = upstream.header(name, value);
     }
     upstream = upstream
+        // Error bodies are inspected for logging; keep their bytes readable.
+        .header(http::header::ACCEPT_ENCODING, "identity")
         .header(
             AUTHORIZATION,
             format!("Bearer {}", state.upstream_key.expose()),
@@ -895,7 +908,10 @@ async fn forward_request(
     );
     let stream = response
         .bytes_stream()
-        .map_ok(Frame::data)
+        .map_ok(move |bytes| {
+            let _keep_active_until_body_drops = &active;
+            Frame::data(bytes)
+        })
         .map_err(|error| -> BoxError { Box::new(error) });
     let body = StreamBody::new(stream).boxed_unsync();
     let mut output = Response::builder().status(status);
@@ -953,12 +969,31 @@ fn looks_like_json_object(bytes: &[u8]) -> bool {
 }
 
 fn summarize_upstream_error(body: &[u8], upstream_key: &str) -> String {
-    let raw = String::from_utf8_lossy(body);
-    let selected = serde_json::from_slice::<Value>(body)
-        .ok()
-        .map(|value| collect_error_fields(&value))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| raw.into_owned());
+    summarize_upstream_error_for_language(body, upstream_key, i18n::language())
+}
+
+fn summarize_upstream_error_for_language(
+    body: &[u8],
+    upstream_key: &str,
+    language: i18n::Language,
+) -> String {
+    let selected = match serde_json::from_slice::<Value>(body) {
+        Ok(value) => collect_error_fields(&value),
+        Err(_) => match std::str::from_utf8(body) {
+            Ok(text)
+                if !text.trim().is_empty()
+                    && !text.chars().any(|c| c.is_control() && !c.is_whitespace()) =>
+            {
+                text.to_owned()
+            }
+            _ => language
+                .text(
+                    "上游返回了非文本错误内容",
+                    "Upstream returned a non-text error response",
+                )
+                .to_owned(),
+        },
+    };
     let redacted = redact_sensitive(&selected, upstream_key);
     safe_log_value(&redacted, MAX_LOG_ERROR_CHARS)
 }
@@ -1093,6 +1128,7 @@ fn is_hop_or_secret_header(name: &str) -> bool {
             | "x-api-key"
             | "host"
             | "content-length"
+            | "accept-encoding"
             | "connection"
             | "transfer-encoding"
             | "proxy-authorization"
@@ -1126,13 +1162,8 @@ fn copy_response_headers(source: &HeaderMap, target: &mut HeaderMap) {
 
 fn upstream_url(base: &Url, uri: &Uri) -> Result<Url> {
     let mut target = base.clone();
-    let base_path = base.path().trim_end_matches('/');
     let incoming = uri.path();
-    let path = if base_path.ends_with("/v1") && incoming.starts_with("/v1/") {
-        format!("{}{}", base_path.trim_end_matches("/v1"), incoming)
-    } else {
-        format!("{base_path}{incoming}")
-    };
+    let path = crate::gateway::upstream_api_path(base, incoming);
     target.set_path(&path);
     target.set_query(uri.query());
     Ok(target)
@@ -1484,6 +1515,35 @@ mod tests {
     }
 
     #[test]
+    fn hidden_menus_do_not_remove_proxy_routes_or_models_endpoint_entries() {
+        let value = catalog();
+        let slots = select_model_slots(&value, &SlotOverrides::default()).unwrap();
+        let ids = crate::catalog::visible_slugs(&value);
+        for full in [
+            DesktopModelMenu::full_catalog_with_source(&value, &slots, "test").unwrap(),
+            DesktopModelMenu::claude_code_catalog(&value, "test").unwrap(),
+        ] {
+            let hidden = full.with_hidden_models(&ids);
+            assert_eq!(hidden.model_count(), 0);
+            assert_eq!(hidden.registry_models_json().unwrap(), "[]");
+            assert!(
+                hidden.claude_code_model_picker()["options"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(full.model_routes().len(), ids.len());
+            assert_eq!(
+                full.models_response(&slots)["data"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                ids.len()
+            );
+        }
+    }
+
+    #[test]
     fn full_catalog_assigns_one_default_per_available_claude_family() {
         let value = catalog();
         let slots = select_model_slots(&value, &SlotOverrides::default()).unwrap();
@@ -1638,6 +1698,28 @@ mod tests {
         assert!(!summary.contains("upstream-test-key"));
     }
 
+    #[test]
+    fn upstream_error_summary_does_not_log_binary_garbage() {
+        for body in [&[0xff, 0xfe, 0x00, 0x81, 0x7f][..], &b"\0binary"[..]] {
+            assert_eq!(
+                summarize_upstream_error_for_language(body, "", i18n::Language::ZhCn),
+                "上游返回了非文本错误内容"
+            );
+            assert_eq!(
+                summarize_upstream_error_for_language(body, "", i18n::Language::En),
+                "Upstream returned a non-text error response"
+            );
+        }
+
+        let text = summarize_upstream_error(b"gateway unavailable", "");
+        assert_eq!(text, "gateway unavailable");
+        let chinese = "{\"error\":{\"message\":\"模型不可用\"}}";
+        assert_eq!(
+            summarize_upstream_error(chinese.as_bytes(), ""),
+            "message=模型不可用"
+        );
+    }
+
     #[tokio::test]
     async fn proxy_rewrites_route_and_preserves_upstream_error_body() {
         let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
@@ -1650,6 +1732,15 @@ mod tests {
             let service = service_fn(move |request: Request<Incoming>| {
                 let captured_tx = captured_tx.clone();
                 async move {
+                    assert_eq!(request.headers()[http::header::ACCEPT_ENCODING], "identity");
+                    assert_eq!(
+                        request
+                            .headers()
+                            .get_all(http::header::ACCEPT_ENCODING)
+                            .iter()
+                            .count(),
+                        1
+                    );
                     let authorization = request
                         .headers()
                         .get(AUTHORIZATION)
@@ -1703,6 +1794,7 @@ mod tests {
         let response = reqwest::Client::new()
             .post(format!("{}/v1/messages", proxy.base_url()))
             .bearer_auth(proxy.local_token())
+            .header(http::header::ACCEPT_ENCODING, "gzip, br")
             .json(&json!({
                 "model": route,
                 "stream": true,

@@ -29,7 +29,14 @@ pub fn backup_files(root: &Path, files: &[&Path]) -> Result<Option<PathBuf>> {
             .with_context(|| format!("备份失败: {} -> {}", source.display(), target.display()))?;
     }
     if let Err(error) = prune_old_backups(backup_root.parent().unwrap_or(root)) {
-        tracing::warn!("清理旧配置备份失败: {error:#}");
+        tracing::warn!(
+            "{}: {}",
+            crate::i18n::tr(
+                "清理旧配置备份失败",
+                "Failed to remove old configuration backups"
+            ),
+            crate::i18n::runtime_error(&error)
+        );
     }
     Ok(Some(backup_root))
 }

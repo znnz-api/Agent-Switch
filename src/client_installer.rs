@@ -184,11 +184,12 @@ async fn install_terminal_client(target: ClientTarget) -> Result<()> {
             );
             if let Err(error) = probe_npm_registry(&client, registry).await {
                 println!(
-                    "{}: {error:#}",
+                    "{}: {}",
                     i18n::tr(
                         "npm 官方源不可用，正在切换 npmmirror 国内镜像",
                         "The official npm registry is unavailable; switching to npmmirror"
-                    )
+                    ),
+                    i18n::runtime_error(&error)
                 );
                 errors.push(format!("{label}: {error:#}"));
                 continue;
@@ -212,8 +213,9 @@ async fn install_terminal_client(target: ClientTarget) -> Result<()> {
             }
             Err(error) => {
                 println!(
-                    "{label} {}: {error:#}",
-                    i18n::tr("安装失败，将尝试下一来源", "failed; trying the next source")
+                    "{label} {}: {}",
+                    i18n::tr("安装失败，将尝试下一来源", "failed; trying the next source"),
+                    i18n::runtime_error(&error)
                 );
                 errors.push(format!("{label}: {error:#}"));
             }
@@ -409,11 +411,12 @@ async fn install_node_lts() -> Result<()> {
             Ok(()) => errors.push(format!("{label}: 安装完成后没有找到 npm.cmd")),
             Err(error) => {
                 println!(
-                    "{label} {}: {error:#}",
+                    "{label} {}: {}",
                     i18n::tr(
                         "安装 Node.js 失败，将尝试下一来源",
                         "failed to install Node.js; trying the next source"
-                    )
+                    ),
+                    i18n::runtime_error(&error)
                 );
                 errors.push(format!("{label}: {error:#}"));
             }
@@ -620,7 +623,8 @@ async fn install_codex_desktop() -> Result<()> {
                 println!("无法记录安装前的 Codex Desktop 进程，将跳过自动关闭保护：{error:#}");
             } else {
                 println!(
-                    "Unable to record Codex Desktop processes before installation; automatic close protection will be skipped: {error:#}"
+                    "Unable to record Codex Desktop processes before installation; automatic close protection will be skipped: {}",
+                    i18n::runtime_error(&error)
                 );
             }
             None
@@ -666,11 +670,12 @@ async fn install_codex_desktop() -> Result<()> {
     }
     let official_error = official.unwrap_err();
     println!(
-        "{}: {official_error:#}",
+        "{}: {}",
         i18n::tr(
             "Microsoft 官方安装引导程序未完成",
             "The official Microsoft installer did not complete"
-        )
+        ),
+        i18n::runtime_error(&official_error)
     );
     println!(
         "{}",
@@ -703,7 +708,8 @@ async fn suppress_codex_desktop_auto_launch(before_pids: &[u32]) {
                     println!("无法检查安装后自动启动的 Codex Desktop：{error:#}");
                 } else {
                     println!(
-                        "Unable to check whether Codex Desktop started automatically after installation: {error:#}"
+                        "Unable to check whether Codex Desktop started automatically after installation: {}",
+                        i18n::runtime_error(&error)
                     );
                 }
                 return;
@@ -722,7 +728,8 @@ async fn suppress_codex_desktop_auto_launch(before_pids: &[u32]) {
                 println!("无法正常关闭安装后自动启动的 Codex Desktop，将尝试清理新进程：{error:#}");
             } else {
                 println!(
-                    "Unable to close the automatically started Codex Desktop normally; attempting to clean up new processes: {error:#}"
+                    "Unable to close the automatically started Codex Desktop normally; attempting to clean up new processes: {}",
+                    i18n::runtime_error(&error)
                 );
             }
             false
@@ -741,7 +748,10 @@ async fn suppress_codex_desktop_auto_launch(before_pids: &[u32]) {
             if i18n::language() == i18n::Language::ZhCn {
                 println!("无法复检安装后自动启动的 Codex Desktop：{error:#}");
             } else {
-                println!("Unable to recheck the automatically started Codex Desktop: {error:#}");
+                println!(
+                    "Unable to recheck the automatically started Codex Desktop: {}",
+                    i18n::runtime_error(&error)
+                );
             }
             return;
         }
@@ -753,7 +763,8 @@ async fn suppress_codex_desktop_auto_launch(before_pids: &[u32]) {
             println!("Codex Desktop 已安装，但无法关闭安装程序自动启动的客户端：{error:#}");
         } else {
             println!(
-                "Codex Desktop was installed, but the client started by the installer could not be closed: {error:#}"
+                "Codex Desktop was installed, but the client started by the installer could not be closed: {}",
+                i18n::runtime_error(&error)
             );
         }
         return;
@@ -826,7 +837,8 @@ async fn install_claude_desktop() -> Result<()> {
                         format!("已下载的 Claude Desktop 安装包签名无效，将重新下载：{error:#}")
                     } else {
                         format!(
-                            "The downloaded Claude Desktop package has an invalid signature; downloading it again: {error:#}"
+                            "The downloaded Claude Desktop package has an invalid signature; downloading it again: {}",
+                            i18n::runtime_error(&error)
                         )
                     }
                 );
@@ -947,7 +959,10 @@ async fn install_claude_desktop() -> Result<()> {
         if i18n::language() == i18n::Language::ZhCn {
             println!("当前用户权限安装未完成：{error:#}");
         } else {
-            println!("Installation with current-user privileges did not complete: {error:#}");
+            println!(
+                "Installation with current-user privileges did not complete: {}",
+                i18n::runtime_error(&error)
+            );
         }
         println!(
             "{}",
@@ -1036,7 +1051,7 @@ async fn download_to_with_timeout(
 
 fn http_client() -> Result<reqwest::Client> {
     network_proxy::configure_reqwest_builder(reqwest::Client::builder())?
-        .user_agent(concat!("znnz-client/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Agent-Switch/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
         .timeout(DOWNLOAD_TIMEOUT)
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -1142,7 +1157,7 @@ fn downloads_directory() -> Result<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
         .unwrap_or_else(std::env::temp_dir);
-    Ok(local.join("znnz-client").join("downloads"))
+    Ok(local.join("Agent-Switch").join("downloads"))
 }
 
 fn windows_architecture() -> Result<&'static str> {

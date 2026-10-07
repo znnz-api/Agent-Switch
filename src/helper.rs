@@ -14,12 +14,12 @@ pub struct Helper {
     #[allow(dead_code)]
     catalog: Arc<RwLock<Value>>,
     shutdown: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl Helper {
     pub async fn start(initial_catalog: Value) -> Result<Self> {
-        crate::catalog::validate_catalog(&initial_catalog)?;
+        crate::catalog::validate_model_menu_catalog(&initial_catalog)?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .context("无法启动本地模型 Helper")?;
@@ -81,7 +81,7 @@ impl Helper {
             token,
             catalog,
             shutdown,
-            task,
+            task: Some(task),
         })
     }
 
@@ -104,14 +104,25 @@ impl Helper {
 
     #[allow(dead_code)]
     pub async fn update_catalog(&self, value: Value) -> Result<()> {
-        crate::catalog::validate_catalog(&value)?;
+        crate::catalog::validate_model_menu_catalog(&value)?;
         *self.catalog.write().await = value;
         Ok(())
     }
 
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
         let _ = self.shutdown.send(true);
-        let _ = self.task.await;
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -245,6 +256,41 @@ mod tests {
                 "supported_in_api": true
             }]
         })
+    }
+
+    #[tokio::test]
+    async fn cancelling_model_monitor_closes_its_helper_listener() {
+        let helper = Helper::start(catalog()).await.unwrap();
+        let address = helper.address;
+        let health = format!("/health?token={}", helper.token);
+        assert!(
+            request(address, &health)
+                .await
+                .starts_with("HTTP/1.1 200 OK")
+        );
+        let task = helper.task.as_ref().unwrap().abort_handle();
+        drop(helper); // Cancelling a client monitor drops its helper without calling stop().
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !task.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // On Windows a TCP handshake can succeed from the old accept backlog;
+        // the cancelled listener must no longer serve an HTTP catalog/health response.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(300))
+            .build()
+            .unwrap();
+        assert!(
+            client
+                .get(format!("http://{address}{health}"))
+                .send()
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

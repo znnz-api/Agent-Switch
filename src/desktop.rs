@@ -52,12 +52,106 @@ impl DesktopLaunch {
     }
 }
 
+/// Close only visible UI, then reclaim the recorded Electron background processes.
+/// A still-open window (including a save dialog) always cancels forced cleanup.
+pub async fn close_for_gateway_attach(target: crate::gui_worker::ClientTarget) -> Result<()> {
+    use crate::gui_worker::ClientTarget;
+    if target == ClientTarget::CodexDesktop
+        && !platform::running_codex_companion_processes()?.is_empty()
+    {
+        bail!(
+            "{}",
+            i18n::tr(
+                "Codex++ 正在维护客户端，无法安全自动重启",
+                "Codex++ is managing the client; it cannot be safely restarted automatically."
+            )
+        );
+    }
+    let session = platform::DesktopRestartSession::begin(target)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut windows_closed_at = None;
+    loop {
+        if !session.running()? {
+            break;
+        }
+        let visible = session.has_visible_windows()?;
+        if visible {
+            windows_closed_at = None;
+        } else {
+            let closed = *windows_closed_at.get_or_insert_with(tokio::time::Instant::now);
+            if closed.elapsed() >= RESTART_WINDOW_GRACE {
+                println!(
+                    "{} {}",
+                    target.title(),
+                    i18n::tr(
+                        "窗口已关闭，正在清理其残留后台进程……",
+                        "windows have closed; cleaning up remaining background processes..."
+                    )
+                );
+                session.terminate_background()?;
+                let cleanup_deadline = tokio::time::Instant::now() + RESTART_TERMINATE_TIMEOUT;
+                while session.running()? {
+                    if tokio::time::Instant::now() >= cleanup_deadline {
+                        bail!(
+                            "{} {}",
+                            target.title(),
+                            i18n::tr(
+                                "后台进程未能完整退出",
+                                "background processes did not fully exit."
+                            )
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                break;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "{} {}",
+                target.title(),
+                i18n::tr(
+                    "未在 30 秒内关闭窗口，已保留进程",
+                    "windows did not close within 30 seconds; processes were left running."
+                )
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // A separately launched instance or respawned helper must not be mistaken
+    // for a successful exit, nor be killed without a recorded process handle.
+    let remaining = match target {
+        ClientTarget::CodexDesktop => platform::running_codex_desktop_process_ids()?,
+        ClientTarget::ClaudeDesktop => platform::running_claude_desktop_process_ids()?,
+        _ => unreachable!(),
+    };
+    if !remaining.is_empty() {
+        bail!(
+            "{} {}",
+            target.title(),
+            i18n::tr(
+                "仍有新进程运行，自动重启 • 失败!",
+                "has new processes still running. Auto-restart • failed!."
+            )
+        );
+    }
+    println!(
+        "{} {}",
+        target.title(),
+        i18n::tr(
+            "已完整退出，准备重新启动。",
+            "has fully exited and is ready to restart."
+        )
+    );
+    Ok(())
+}
+
 pub async fn restart_running_desktop() -> Result<()> {
     let companions = platform::running_codex_companion_processes()?;
     if !companions.is_empty() {
         if i18n::language() == i18n::Language::ZhCn {
             bail!(
-                "检测到 Codex++ 相关进程仍在运行: {}。为避免它同时改写配置或接管 Desktop，请先完全退出 Codex++ 后重试。",
+                "检测到 Codex++ 相关进程仍在运行: {}。为避免它同时改写配置或接管 Desktop，请先退出 Codex++ 后重试。",
                 companions.join("、")
             );
         } else {
@@ -238,7 +332,7 @@ pub async fn launch_and_inject(
     desktop_exe: Option<&Path>,
 ) -> Result<()> {
     let gateway = GatewayIdentity::parse(gateway_url)?;
-    let catalog_value = catalog::read_catalog(&paths.codex_catalog).with_context(|| {
+    let catalog_value = catalog::read_model_menu_catalog(&paths.codex_catalog).with_context(|| {
         if i18n::language() == i18n::Language::ZhCn {
             format!(
                 "启动前需要有效模型目录: {}；请先运行 install 或 refresh",
@@ -278,6 +372,7 @@ pub async fn launch_and_inject(
         );
 
         let mut injected = wait_for_initial_injection(debug_port, &renderer_injection, &mut launch).await?;
+        crate::local_gateway::confirm_current_worker(crate::gui_worker::ClientTarget::CodexDesktop)?;
         println!(
             "{}",
             if i18n::language() == i18n::Language::ZhCn {
@@ -292,8 +387,8 @@ pub async fn launch_and_inject(
         println!(
             "{}",
             i18n::tr(
-                "启动器会在后台维护注入；退出 Codex Desktop 后本程序会自动结束。",
-                "The launcher will maintain injection in the background and exit after Codex Desktop closes."
+                "模型目录已接入，正在后台维护。",
+                "The model catalog is connected and maintained in the background."
             )
         );
 
@@ -324,12 +419,10 @@ pub async fn launch_without_injection(
         )
     );
     wait_for_desktop_ready(debug_port, &mut launch).await?;
+    crate::local_gateway::confirm_current_worker(crate::gui_worker::ClientTarget::CodexDesktop)?;
     println!(
         "{}",
-        i18n::tr(
-            "Codex Desktop 已启动；关闭 Codex Desktop 后本程序会自动结束。",
-            "Codex Desktop started. The launcher will exit after Codex Desktop closes."
-        )
+        i18n::tr("Codex Desktop 已启动。", "Codex Desktop started.")
     );
     watch_desktop_exit(debug_port, &mut launch).await
 }

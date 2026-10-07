@@ -6,7 +6,7 @@ mod imp {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Cryptography::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
@@ -40,6 +40,16 @@ mod imp {
     struct RegistrySnapshot {
         key_existed: bool,
         values: BTreeMap<String, Option<StoredValue>>,
+        #[serde(default)]
+        config_library: Option<ConfigLibrarySnapshot>,
+        #[serde(default)]
+        desktop_config: Option<ConfigLibrarySnapshot>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    struct ConfigLibrarySnapshot {
+        path: String,
+        before: Option<String>,
     }
 
     #[derive(Debug, Clone)]
@@ -81,9 +91,284 @@ mod imp {
             .map(PathBuf::from)
             .context("无法确定 LOCALAPPDATA，不能安全保存 Claude Desktop 注册表备份")?;
         Ok(local
-            .join("znnz-client")
+            .join("Agent-Switch")
             .join("claude-desktop")
             .join("registry-backup.dpapi"))
+    }
+
+    pub fn is_agent_switch_gateway() -> Result<bool> {
+        if backup_path()?.is_file() {
+            return Ok(true);
+        }
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        match hkcu.open_subkey_with_flags(POLICY_PATH, KEY_READ) {
+            Ok(key) => {
+                let url: String = key.get_value("inferenceGatewayBaseUrl").unwrap_or_default();
+                let provider: String = key.get_value("inferenceProvider").unwrap_or_default();
+                if provider == "gateway"
+                    && url::Url::parse(&url).ok().is_some_and(|url| {
+                        matches!(
+                            url.host_str(),
+                            Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+                        )
+                    })
+                {
+                    return Ok(true);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("Unable to read Claude Desktop gateway policy");
+            }
+        }
+        Ok(config_library_gateway().is_some())
+    }
+
+    pub fn restore_account_mode() -> Result<()> {
+        if restore_pending()? {
+            return Ok(());
+        }
+        clear_stale_gateway_policy()
+    }
+
+    /// Remove only a recognizable Agent-Switch loopback policy when its
+    /// encrypted snapshot is missing (for example after an older build or an
+    /// interrupted account-mode transition). Never touch remote or unrelated
+    /// enterprise policies.
+    pub fn clear_stale_gateway_policy() -> Result<()> {
+        // Compatibility with a missing backup: only remove a local gateway,
+        // never an unrelated enterprise policy or a remote inference gateway.
+        if !is_agent_switch_gateway()? {
+            return Ok(());
+        }
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(key) = hkcu.open_subkey_with_flags(POLICY_PATH, KEY_READ | KEY_WRITE) {
+            let url: String = key.get_value("inferenceGatewayBaseUrl").unwrap_or_default();
+            let provider: String = key.get_value("inferenceProvider").unwrap_or_default();
+            let local = provider == "gateway"
+                && url::Url::parse(&url).ok().is_some_and(|url| {
+                    matches!(
+                        url.host_str(),
+                        Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+                    )
+                });
+            if local {
+                for name in MANAGED_VALUES {
+                    match key.delete_value(name) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error)
+                                .context("Unable to remove Claude Desktop gateway policy");
+                        }
+                    }
+                }
+            }
+        }
+        clear_config_library_gateway()?;
+        set_desktop_deployment_mode(Some("1p"))?;
+        Ok(())
+    }
+
+    fn desktop_config_path() -> Result<PathBuf> {
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .context("无法确定 LOCALAPPDATA")?;
+        Ok(local.join("Claude-3p").join("claude_desktop_config.json"))
+    }
+
+    fn optional_file_contents(path: &Path) -> Result<Option<String>> {
+        match fs::read_to_string(path) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("无法读取 {}", path.display())),
+        }
+    }
+
+    fn set_desktop_deployment_mode(mode: Option<&str>) -> Result<()> {
+        let path = desktop_config_path()?;
+        let mut object = match optional_file_contents(&path)? {
+            Some(raw) => serde_json::from_str::<serde_json::Value>(&raw)
+                .context("Claude Desktop 主配置格式无效")?
+                .as_object()
+                .cloned()
+                .context("Claude Desktop 主配置必须是 JSON 对象")?,
+            None => serde_json::Map::new(),
+        };
+        match mode {
+            Some(mode) => {
+                object.insert("deploymentMode".into(), mode.into());
+            }
+            None => {
+                object.remove("deploymentMode");
+            }
+        }
+        backup::atomic_write(&path, &serde_json::to_vec_pretty(&object)?)
+            .with_context(|| format!("无法写入 Claude Desktop 配置 {}", path.display()))
+    }
+
+    pub fn ensure_third_party_mode() -> Result<()> {
+        let path = desktop_config_path()?;
+        let current = optional_file_contents(&path)?
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+            .transpose()
+            .context("Claude Desktop 主配置格式无效")?
+            .and_then(|value| {
+                value
+                    .get("deploymentMode")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        if current.as_deref() != Some("3p") {
+            set_desktop_deployment_mode(Some("3p"))?;
+        }
+        Ok(())
+    }
+
+    fn config_library_paths() -> Result<Option<(PathBuf, PathBuf)>> {
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .context("无法确定 LOCALAPPDATA")?;
+        let root = local.join("Claude-3p").join("configLibrary");
+        let meta_path = root.join("_meta.json");
+        if !meta_path.is_file() {
+            return Ok(None);
+        }
+        let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(&meta_path)?)
+            .context("Claude Desktop 配置清单格式无效")?;
+        let Some(id) = meta.get("appliedId").and_then(serde_json::Value::as_str) else {
+            return Ok(None);
+        };
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            bail!("Claude Desktop 配置清单包含无效配置 ID");
+        }
+        Ok(Some((meta_path, root.join(format!("{id}.json")))))
+    }
+
+    fn config_library_gateway() -> Option<(PathBuf, serde_json::Map<String, serde_json::Value>)> {
+        let (_, path) = config_library_paths().ok()??;
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+        let object = value.as_object()?.clone();
+        let provider = object.get("inferenceProvider")?.as_str()?;
+        let url = object.get("inferenceGatewayBaseUrl")?.as_str()?;
+        if provider == "gateway"
+            && url::Url::parse(url).ok().is_some_and(|url| {
+                matches!(
+                    url.host_str(),
+                    Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+                )
+            })
+        {
+            Some((path, object))
+        } else {
+            None
+        }
+    }
+
+    fn clear_config_library_gateway() -> Result<()> {
+        let Some((path, mut object)) = config_library_gateway() else {
+            return Ok(());
+        };
+        for name in [
+            "inferenceGatewayBaseUrl",
+            "inferenceGatewayApiKey",
+            "inferenceProvider",
+            "inferenceCredentialKind",
+        ] {
+            object.remove(name);
+        }
+        if object.is_empty() {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("无法清理 Claude Desktop 活动配置"),
+            }
+        } else {
+            backup::atomic_write(&path, &serde_json::to_vec_pretty(&object)?)
+                .context("无法清理 Claude Desktop 活动配置")?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_temporary_gateway(
+        base_url: &str,
+        local_token: &str,
+        inference_models: &str,
+        model_discovery_enabled: Option<bool>,
+    ) -> Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let key = hkcu
+            .open_subkey_with_flags(POLICY_PATH, KEY_READ)
+            .context("无法重新读取 Claude Desktop 网关策略注册表")?;
+        let actual_url: String = key
+            .get_value("inferenceGatewayBaseUrl")
+            .context("Claude Desktop 网关地址未写入")?;
+        let actual_token: String = key
+            .get_value("inferenceGatewayApiKey")
+            .context("Claude Desktop 网关 Key 未写入")?;
+        let provider: String = key
+            .get_value("inferenceProvider")
+            .context("Claude Desktop 网关提供商未写入")?;
+        let models: String = key
+            .get_value("inferenceModels")
+            .context("Claude Desktop 模型列表未写入")?;
+        if actual_url != base_url
+            || actual_token != local_token
+            || provider != "gateway"
+            || models != inference_models
+        {
+            bail!("Claude Desktop 网关策略写入后校验不一致");
+        }
+        if let Some(expected) = model_discovery_enabled {
+            let actual: u32 = key
+                .get_value("modelDiscoveryEnabled")
+                .context("Claude Desktop 模型发现设置未写入")?;
+            if actual != u32::from(expected) {
+                bail!("Claude Desktop 模型发现设置写入后校验不一致");
+            }
+        }
+        if let Some((path, object)) = config_library_gateway() {
+            let actual_url = object
+                .get("inferenceGatewayBaseUrl")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if actual_url != base_url {
+                bail!(
+                    "Claude Desktop 活动配置网关地址校验不一致: {}",
+                    path.display()
+                );
+            }
+        }
+        let deployment_mode = optional_file_contents(&desktop_config_path()?)?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| {
+                value
+                    .get("deploymentMode")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        if deployment_mode.as_deref() != Some("3p") {
+            bail!("Claude Desktop 当前不是第三方网关模式（deploymentMode 未设为 3p）");
+        }
+        Ok(())
+    }
+
+    pub fn validate_account_restore() -> Result<()> {
+        let path = backup_path()?;
+        if path.is_file() {
+            let bytes = fs::read(path)?;
+            if !bytes.starts_with(BACKUP_MAGIC) {
+                bail!("Invalid Claude Desktop policy backup");
+            }
+            let plain = dpapi_unprotect(&bytes[BACKUP_MAGIC.len()..])?;
+            let _: RegistrySnapshot = serde_json::from_slice(&plain)?;
+        }
+        Ok(())
     }
 
     pub fn restore_pending() -> Result<bool> {
@@ -152,6 +437,24 @@ mod imp {
             key.set_value("modelDiscoveryEnabled", &value)
                 .context("无法写入 Claude Desktop 注册表值 modelDiscoveryEnabled")?;
         }
+        if let Some((_, path)) = config_library_paths()? {
+            let mut object = match fs::read_to_string(&path) {
+                Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
+                    .context("Claude Desktop 活动配置格式无效")?
+                    .as_object()
+                    .cloned()
+                    .context("Claude Desktop 活动配置必须是对象")?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => serde_json::Map::new(),
+                Err(error) => return Err(error).context("无法读取 Claude Desktop 活动配置"),
+            };
+            object.insert("inferenceGatewayBaseUrl".into(), base_url.into());
+            object.insert("inferenceGatewayApiKey".into(), "PROXY_MANAGED".into());
+            object.insert("inferenceProvider".into(), "gateway".into());
+            object.insert("inferenceCredentialKind".into(), "static".into());
+            backup::atomic_write(&path, &serde_json::to_vec_pretty(&object)?)
+                .context("无法写入 Claude Desktop 活动配置")?;
+        }
+        set_desktop_deployment_mode(Some("3p"))?;
         Ok(())
     }
 
@@ -178,9 +481,24 @@ mod imp {
             };
             values.insert(name.to_owned(), value);
         }
+        let config_library = config_library_paths()?
+            .map(|(_, path)| -> Result<ConfigLibrarySnapshot> {
+                Ok(ConfigLibrarySnapshot {
+                    path: path.to_string_lossy().into_owned(),
+                    before: optional_file_contents(&path)?,
+                })
+            })
+            .transpose()?;
+        let desktop_path = desktop_config_path()?;
+        let desktop_config = Some(ConfigLibrarySnapshot {
+            path: desktop_path.to_string_lossy().into_owned(),
+            before: optional_file_contents(&desktop_path)?,
+        });
         Ok(RegistrySnapshot {
             key_existed: key.is_some(),
             values,
+            config_library,
+            desktop_config,
         })
     }
 
@@ -240,6 +558,28 @@ mod imp {
                         return Err(error).context("无法删除原本不存在的空 Claude 策略键");
                     }
                 }
+            }
+        }
+        for file in [
+            snapshot.config_library.as_ref(),
+            snapshot.desktop_config.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = Path::new(&file.path);
+            match &file.before {
+                Some(before) => backup::atomic_write(path, before.as_bytes())
+                    .with_context(|| format!("无法恢复 Claude Desktop 配置 {}", path.display()))?,
+                None => match fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("无法删除 Claude Desktop 配置 {}", path.display())
+                        });
+                    }
+                },
             }
         }
         Ok(())
@@ -346,6 +686,8 @@ mod imp {
             let snapshot = RegistrySnapshot {
                 key_existed: true,
                 values,
+                config_library: None,
+                desktop_config: None,
             };
             let encoded = serde_json::to_vec(&snapshot).unwrap();
             let decoded: RegistrySnapshot = serde_json::from_slice(&encoded).unwrap();
@@ -398,6 +740,29 @@ mod imp {
     }
     pub fn restore_pending() -> Result<bool> {
         bail!("当前平台不支持 Claude Desktop Windows 注册表配置")
+    }
+    pub fn is_agent_switch_gateway() -> Result<bool> {
+        Ok(false)
+    }
+    pub fn restore_account_mode() -> Result<()> {
+        bail!("Claude Desktop account mode is only supported on Windows")
+    }
+    pub fn clear_stale_gateway_policy() -> Result<()> {
+        bail!("Claude Desktop gateway policy is only supported on Windows")
+    }
+    pub fn ensure_third_party_mode() -> Result<()> {
+        bail!("Claude Desktop gateway policy is only supported on Windows")
+    }
+    pub fn validate_temporary_gateway(
+        _base_url: &str,
+        _local_token: &str,
+        _inference_models: &str,
+        _model_discovery_enabled: Option<bool>,
+    ) -> Result<()> {
+        bail!("Claude Desktop gateway policy is only supported on Windows")
+    }
+    pub fn validate_account_restore() -> Result<()> {
+        bail!("Claude Desktop account mode is only supported on Windows")
     }
     pub fn capture_and_store() -> Result<()> {
         bail!("当前平台不支持 Claude Desktop Windows 注册表配置")

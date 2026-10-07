@@ -4,7 +4,6 @@ Issues and pull requests are welcome.
 
 Please keep the project simple:
 
-- Keep znnz.net as the default while preserving standard custom gateway support.
 - Never record or commit API Keys.
 - Do not break users' existing Codex or Claude settings and sessions.
 
@@ -19,13 +18,12 @@ node --test tests/renderer-inject.test.js
 
 When changing configuration, registry, installers, or authentication, include relevant tests.
 
-## 中文
+## 中文说明
 
 欢迎提交 Issue 和 Pull Request。
 
 请保持项目简洁：
 
-- 保留 znnz.net 为默认网关，同时支持标准自定义网关
 - 不记录或提交 API Key
 - 不破坏用户现有的 Codex、Claude 配置和会话
 

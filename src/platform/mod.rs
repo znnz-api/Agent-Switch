@@ -10,6 +10,44 @@ mod portable {
 
     pub struct NamedMutexGuard;
 
+    pub struct DesktopRestartSession;
+    pub struct TerminalRestartSession;
+
+    impl TerminalRestartSession {
+        pub fn verify_client_sessions(&self) -> Result<()> {
+            bail!("终端自动重启仅支持 Windows")
+        }
+        pub fn record(_pid: u32, _target: crate::gui_worker::ClientTarget) -> Result<Self> {
+            bail!("当前平台不支持终端自动重启")
+        }
+        pub fn close(&self) -> Result<()> {
+            bail!("当前平台不支持终端自动重启")
+        }
+    }
+
+    impl DesktopRestartSession {
+        pub fn begin(_target: crate::gui_worker::ClientTarget) -> Result<Self> {
+            bail!("当前平台不支持安全自动重启桌面客户端")
+        }
+        pub fn has_visible_windows(&self) -> Result<bool> {
+            Ok(false)
+        }
+        pub fn running(&self) -> Result<bool> {
+            Ok(false)
+        }
+        pub fn terminate_background(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    pub fn running_client_processes() -> Result<Vec<(crate::gui_worker::ClientTarget, u32)>> {
+        Ok(Vec::new())
+    }
+
+    pub fn process_image_path(_pid: u32) -> Result<String> {
+        bail!("Process image inspection is unavailable")
+    }
+
     pub fn try_acquire_named_mutex(_name: &str) -> Result<Option<NamedMutexGuard>> {
         Ok(Some(NamedMutexGuard))
     }

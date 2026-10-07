@@ -6,11 +6,11 @@ use std::path::PathBuf;
 #[command(
     name = "znnz-agent-launcher",
     version,
-    about = "默认使用 znnz.net、同时支持自定义标准 AI 网关的 Agent 启动器"
+    about = "Agent-Switch local AI gateway manager for Codex and Claude clients"
 )]
 pub struct Cli {
     /// 默认网关地址，可被子命令中的同名参数覆盖。
-    #[arg(long, global = true, default_value = "https://api.znnz.net")]
+    #[arg(long, global = true, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
     pub gateway_url: String,
 
     #[command(subcommand)]
@@ -25,7 +25,7 @@ pub enum Command {
         codex_home: Option<PathBuf>,
         #[arg(long)]
         claude_home: Option<PathBuf>,
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         /// 使用已有 Key 验证网关和模型接口。
         #[arg(long)]
@@ -37,7 +37,7 @@ pub enum Command {
         codex_home: Option<PathBuf>,
         #[arg(long)]
         claude_home: Option<PathBuf>,
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long, env = "ZNNZ_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
@@ -61,7 +61,7 @@ pub enum Command {
     Refresh {
         #[arg(long)]
         codex_home: Option<PathBuf>,
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long, env = "ZNNZ_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
@@ -74,7 +74,7 @@ pub enum Command {
     Launch {
         #[arg(long)]
         codex_home: Option<PathBuf>,
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long, env = "ZNNZ_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
@@ -97,7 +97,7 @@ pub enum Command {
     InternalRun {
         #[arg(value_enum)]
         client: ClientTarget,
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long, value_enum, default_value = "gateway")]
         model_list_mode: ModelListMode,
@@ -111,12 +111,26 @@ pub enum Command {
     /// GUI 内部工作进程：验证网关和模型目录。
     #[command(hide = true)]
     InternalTestGateway {
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         /// GUI 的“拉取模型”操作；未指定时为“测试连接”。
         #[arg(long)]
         fetch_models: bool,
     },
+    /// GUI 内部工作进程：更新常驻本地网关的上游路由，不重启客户端。
+    #[command(hide = true)]
+    InternalGatewayUpdate {
+        #[arg(value_enum)]
+        client: ClientTarget,
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
+        gateway_url: String,
+    },
+    /// GUI 内部常驻本地网关服务。
+    #[command(hide = true)]
+    InternalGateway,
+    /// Read-only process detection diagnostics; never changes client configuration.
+    #[command(hide = true)]
+    InternalClientStatus,
     /// 开发用：只启动本地 Helper。
     #[command(hide = true)]
     HelperTest {
@@ -131,7 +145,7 @@ pub enum Command {
 pub enum ClaudeDesktopCommand {
     /// 只读检查 Claude Desktop、注册表与网关模型，不修改任何历史数据。
     Diagnose {
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long, env = "ZNNZ_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
@@ -141,7 +155,7 @@ pub enum ClaudeDesktopCommand {
     },
     /// 临时配置本地安全代理并启动 Claude Desktop；退出后自动恢复原注册表。
     Launch {
-        #[arg(long, default_value = "https://api.znnz.net")]
+        #[arg(long, default_value = crate::gateway::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long, env = "ZNNZ_API_KEY", hide_env_values = true)]
         api_key: Option<String>,

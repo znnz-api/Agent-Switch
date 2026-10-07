@@ -73,32 +73,31 @@ pub async fn launch(
     overrides: SlotOverrides,
     mode: ClaudeDesktopModelMode,
 ) -> Result<()> {
-    let status = registry::status()?;
+    launch_with_hidden_models(gateway_url, api_key, overrides, mode, &[]).await
+}
+
+pub async fn launch_with_hidden_models(
+    gateway_url: &str,
+    api_key: String,
+    overrides: SlotOverrides,
+    mode: ClaudeDesktopModelMode,
+    hidden_models: &[String],
+) -> Result<()> {
     let running = platform::running_claude_desktop_processes()?;
     if !running.is_empty() {
-        if i18n::language() == i18n::Language::ZhCn {
-            let pending = if status.pending_backup {
-                "并且检测到上次异常退出遗留的注册表备份；请先完全退出 Desktop，再运行 claude-desktop restore"
-            } else {
-                ""
-            };
-            bail!(
-                "检测到 Claude Desktop 仍在运行: {}。为保护历史任务并确保注册表配置生效，请先从托盘完全退出 Claude Desktop后重试。{}",
-                running.join("；"),
-                pending
-            );
-        } else {
-            let pending = if status.pending_backup {
-                " An encrypted registry backup from an earlier abnormal exit is also present; fully exit Desktop, then run claude-desktop restore first."
-            } else {
-                ""
-            };
-            bail!(
-                "Claude Desktop is still running: {}. Fully exit Claude Desktop from the tray before retrying to protect existing tasks and apply the registry configuration.{}",
-                running.join(", "),
-                pending
-            );
-        }
+        crate::desktop::close_for_gateway_attach(crate::gui_worker::ClientTarget::ClaudeDesktop)
+            .await
+            .context(i18n::tr(
+                "Claude Desktop • 自动重启 • 失败!",
+                "Claude Desktop • Auto-restart • failed!",
+            ))?;
+        println!(
+            "{}",
+            i18n::tr(
+                "已正常关闭正在运行的 Claude Desktop，准备应用网关配置。",
+                "Claude Desktop exited normally; applying the gateway configuration."
+            )
+        );
     }
     if registry::restore_pending()? {
         println!(
@@ -109,6 +108,11 @@ pub async fn launch(
             )
         );
     }
+    // Older builds could leave only the loopback policy after account-mode
+    // recovery. Clear that recognizable stale policy before taking the new
+    // snapshot, otherwise Claude Desktop may keep using an obsolete route and
+    // ignore the newly injected model catalog.
+    registry::clear_stale_gateway_policy()?;
 
     let api_key = Zeroizing::new(api_key);
     println!(
@@ -175,7 +179,9 @@ pub async fn launch(
             menu
         }
     };
-    let inference_models = menu.registry_models_json()?;
+    let inference_models = menu
+        .with_hidden_models(hidden_models)
+        .registry_models_json()?;
     let discovery_enabled = match menu.mode() {
         ClaudeDesktopModelMode::FourSlots => None,
         ClaudeDesktopModelMode::FullCatalog => Some(false),
@@ -225,6 +231,21 @@ pub async fn launch(
         }
         return Err(error);
     }
+    if let Err(error) = registry::validate_temporary_gateway(
+        &proxy.base_url(),
+        proxy.local_token(),
+        &inference_models,
+        discovery_enabled,
+    ) {
+        let restore = registry::restore_pending();
+        proxy.stop().await;
+        if let Err(restore_error) = restore {
+            return Err(error).context(format!(
+                "Claude Desktop 网关策略校验失败，且恢复原注册表也失败: {restore_error:#}"
+            ));
+        }
+        return Err(error);
+    }
 
     println!(
         "{}",
@@ -247,7 +268,21 @@ pub async fn launch(
         )
     );
 
-    let session_result = run_desktop_session().await;
+    let session_result = run_desktop_session().await.context(i18n::tr(
+        "Claude Desktop • 自动重启 • 失败!",
+        "Claude Desktop • Auto-restart • failed!",
+    ));
+    if crate::background::is_managed() && session_result.is_ok() {
+        crate::background::retain_proxy(crate::gui_worker::ClientTarget::ClaudeDesktop, proxy);
+        println!(
+            "{}",
+            i18n::tr(
+                "Claude Desktop 已退出；网关保持运行，可直接重新打开客户端。",
+                "Claude Desktop closed; the gateway remains available when the client reopens."
+            )
+        );
+        return Ok(());
+    }
     proxy.stop().await;
     let restore_result = registry::restore_pending();
 
@@ -274,7 +309,7 @@ pub async fn launch(
 
 pub fn restore() -> Result<()> {
     if !platform::running_claude_desktop_processes()?.is_empty() {
-        bail!("Claude Desktop 仍在运行。请先从托盘完全退出，再恢复注册表配置。");
+        bail!("Claude Desktop 仍在运行。请先从托盘退出，再恢复注册表配置。");
     }
     if registry::restore_pending()? {
         println!("已恢复 Claude Desktop 原注册表配置，并删除加密备份。");
@@ -299,6 +334,10 @@ async fn run_desktop_session() -> Result<()> {
     loop {
         let pids = platform::running_claude_desktop_process_ids()?;
         if !pids.is_empty() {
+            registry::ensure_third_party_mode()?;
+            crate::local_gateway::confirm_current_worker(
+                crate::gui_worker::ClientTarget::ClaudeDesktop,
+            )?;
             let pids = pids
                 .iter()
                 .map(u32::to_string)
@@ -307,12 +346,10 @@ async fn run_desktop_session() -> Result<()> {
             println!(
                 "{}",
                 if i18n::language() == i18n::Language::ZhCn {
-                    format!(
-                        "已检测到 Claude Desktop 进程（PID: {pids}）。启动器会在后台保持本地代理；完全退出 Desktop 后会自动恢复注册表并结束。"
-                    )
+                    format!("已检测到 Claude Desktop 进程（PID: {pids}）。本地代理正在运行。")
                 } else {
                     format!(
-                        "Detected Claude Desktop process(es) (PID: {pids}). The launcher will keep the local proxy running in the background and restore the original registry settings after Desktop fully exits."
+                        "Detected Claude Desktop process(es) (PID: {pids}). The local proxy is running."
                     )
                 }
             );
@@ -369,6 +406,7 @@ async fn run_desktop_session() -> Result<()> {
             }
         } else {
             missed = 0;
+            registry::ensure_third_party_mode()?;
         }
     }
 }
