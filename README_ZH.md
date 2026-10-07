@@ -2,7 +2,7 @@
 
 > [English](README.md) | 中文
 
-一个免费、轻量的 AI 网关管理器，让 Codex 与 Claude 客户端共享一个可切换、可观测的本地网关，支持多供应商管理、本地协议转换、模型映射注入和用量统计。
+一个免费、轻量的 AI 网关管理器，让 Codex 与 Claude 客户端共享一个可切换、可观测的本地网关，支持多供应商管理、本地协议转换、模型映射注入、用量统计等功能。
 
 ![Agent-Switch](imgs/Agent-Switch-zh/png/123456.png)
 
