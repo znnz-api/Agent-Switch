@@ -297,16 +297,14 @@ fn restore_toml(current: &mut DocumentMut, before: &DocumentMut, written: &Docum
             .and_then(|table| table.get(id));
         if old.map(ToString::to_string) != owned.map(ToString::to_string)
             && now.map(ToString::to_string) == owned.map(ToString::to_string)
-        {
-            if let Some(table) = current
+            && let Some(table) = current
                 .get_mut("model_providers")
                 .and_then(Item::as_table_mut)
-            {
-                if let Some(old) = old {
-                    table.insert(id, old.clone());
-                } else {
-                    table.remove(id);
-                }
+        {
+            if let Some(old) = old {
+                table.insert(id, old.clone());
+            } else {
+                table.remove(id);
             }
         }
     }

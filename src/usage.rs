@@ -131,6 +131,7 @@ impl Recorder {
         Ok(Self(sender))
     }
 
+    #[cfg(test)]
     pub fn start(&self, configuration: String, protocol: Protocol) -> RequestUsage {
         self.start_with_metadata(configuration, protocol, RequestMetadata::default())
     }
@@ -522,7 +523,8 @@ impl Protocol {
     }
 }
 
-pub fn inference_protocol(method: &http::Method, path: &str) -> Option<Protocol> {
+#[cfg(test)]
+fn inference_protocol(method: &http::Method, path: &str) -> Option<Protocol> {
     if method != http::Method::POST {
         return None;
     }

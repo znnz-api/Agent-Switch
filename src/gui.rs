@@ -185,7 +185,6 @@ struct GuiAssets {
     server: TextureHandle,
     key: TextureHandle,
     statistics: TextureHandle,
-    link: TextureHandle,
     convert: TextureHandle,
     converting: Vec<TextureHandle>,
     models: TextureHandle,
@@ -302,15 +301,6 @@ impl GuiAssets {
                 "gui-statistics-svg",
                 include_bytes!("../assets/gui/svg/statistics.svg"),
                 Vec2::splat(layout::HISTORY_USAGE_ICON_SIZE),
-            ),
-            link: load_embedded_svg_texture(
-                context,
-                "gui-link-svg",
-                include_bytes!("../assets/gui/svg/link.svg"),
-                Vec2::new(
-                    layout::CONNECT_ACTION_ICON_WIDTH,
-                    layout::CONNECT_ACTION_ICON_HEIGHT,
-                ),
             ),
             convert: load_embedded_svg_texture(
                 context,
@@ -4120,45 +4110,6 @@ fn render_header(ui: &mut egui::Ui, assets: &GuiAssets, header_rect: Rect) {
     }
 }
 
-fn paint_wavy_underline(
-    painter: &egui::Painter,
-    left: f32,
-    right: f32,
-    bottom: f32,
-    color: Color32,
-) {
-    let points = wavy_underline_points(left, right, bottom);
-    if !points.is_empty() {
-        painter.add(egui::Shape::line(points, Stroke::new(0.8, color)));
-    }
-}
-
-fn wavy_underline_points(left: f32, right: f32, bottom: f32) -> Vec<egui::Pos2> {
-    let width = right - left;
-    if width <= 0.0 {
-        return Vec::new();
-    }
-
-    // CSS 参考图形的半波长约为 2.375px。使用偶数段并重新均分宽度，
-    // 保证左右端点精确落在下方，最后一段不会向上折。
-    let mut segment_count = (width / 2.375).round().max(2.0) as usize;
-    if !segment_count.is_multiple_of(2) {
-        segment_count += 1;
-    }
-    let half_step = width / segment_count as f32;
-    let top = bottom - 3.0;
-    let mut points = Vec::with_capacity(segment_count + 1);
-    for index in 0..=segment_count {
-        let x = if index == segment_count {
-            right
-        } else {
-            left + index as f32 * half_step
-        };
-        points.push(egui::pos2(x, if index % 2 == 0 { bottom } else { top }));
-    }
-    points
-}
-
 fn render_divider(ui: &mut egui::Ui, divider_rect: Rect) {
     if layout::DIVIDER_HEIGHT <= 0.0 {
         return;
@@ -4411,6 +4362,7 @@ fn render_key_visibility_button_at(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_icon_button_at(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -4715,6 +4667,7 @@ fn point_along_polyline(path: &[egui::Pos2], progress: f32) -> egui::Pos2 {
     path.last().copied().unwrap_or_default()
 }
 
+#[cfg(test)]
 fn point_to_polyline_distance(point: egui::Pos2, path: &[egui::Pos2]) -> f32 {
     path.windows(2)
         .map(|pair| {
@@ -7889,7 +7842,7 @@ mod tests {
         );
         assert_eq!(provider_column_count(content_width, 3), 3);
         assert_eq!(provider_column_count(content_width, 0), 1);
-        assert!(is_model_list_change_status("模型列表变更 • 下次配置生效"));
+        assert!(is_model_list_change_status("模型列表变更 • 下次启动生效"));
         assert!(is_model_list_change_status(
             "Model list changes • Takes effect on next config"
         ));

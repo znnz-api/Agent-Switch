@@ -116,10 +116,10 @@ pub async fn fetch_catalog(
 
 fn strip_google_model_prefixes(value: &mut Value) {
     for key in ["id", "slug", "name"] {
-        if let Some(text) = value.get(key).and_then(Value::as_str).map(str::to_owned) {
-            if let Some(short) = text.strip_prefix("models/") {
-                value[key] = Value::String(short.to_owned());
-            }
+        if let Some(text) = value.get(key).and_then(Value::as_str).map(str::to_owned)
+            && let Some(short) = text.strip_prefix("models/")
+        {
+            value[key] = Value::String(short.to_owned());
         }
     }
     match value {
@@ -236,7 +236,7 @@ pub fn normalize_catalog(value: &Value) -> Result<Value> {
                 .iter()
                 .filter_map(|key| model.get(*key).and_then(Value::as_str))
                 .map(str::trim)
-                .any(is_conversational_model)
+                .any(|id| id != "codex-auto-review" && is_conversational_model(id))
         })
     });
     let mut normalized = if models.is_some()

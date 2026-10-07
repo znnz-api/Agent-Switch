@@ -95,10 +95,10 @@ impl Tracker {
                 if let Some(id) = call["id"].as_str() {
                     self.call_ids.insert(index, id.to_owned());
                 }
-                if let Some(id) = self.call_ids.get(&index) {
-                    if let Ok(mut cache) = self.cache.lock() {
-                        cache.remember(&self.configuration, id, &call["extra_content"]);
-                    }
+                if let Some(id) = self.call_ids.get(&index)
+                    && let Ok(mut cache) = self.cache.lock()
+                {
+                    cache.remember(&self.configuration, id, &call["extra_content"]);
                 }
             }
         }

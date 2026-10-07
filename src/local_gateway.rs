@@ -928,33 +928,33 @@ async fn forward(
                 .usage
                 .start_with_metadata(configuration.clone(), protocol, metadata)
         });
-    if let Some(destination) = target_protocol {
-        if source_protocol != Some(destination) {
-            if destination == crate::protocol::WireProtocol::Gemini {
-                let model = request_model.as_deref().unwrap_or("gemini");
-                let root = if upstream_base.path().trim_end_matches('/').is_empty() {
-                    "/v1beta"
-                } else {
-                    upstream_base.path().trim_end_matches('/')
-                };
-                let action = if request_is_streaming(&bytes) {
-                    "streamGenerateContent"
-                } else {
-                    "generateContent"
-                };
-                target.set_path(&format!("{root}/models/{model}:{action}"));
-                if request_is_streaming(&bytes) {
-                    target.set_query(Some("alt=sse"));
-                }
+    if let Some(destination) = target_protocol
+        && source_protocol != Some(destination)
+    {
+        if destination == crate::protocol::WireProtocol::Gemini {
+            let model = request_model.as_deref().unwrap_or("gemini");
+            let root = if upstream_base.path().trim_end_matches('/').is_empty() {
+                "/v1beta"
             } else {
-                let path = match destination {
-                    crate::protocol::WireProtocol::Responses => "/v1/responses",
-                    crate::protocol::WireProtocol::Messages => "/v1/messages",
-                    crate::protocol::WireProtocol::ChatCompletions => "/v1/chat/completions",
-                    crate::protocol::WireProtocol::Gemini => unreachable!(),
-                };
-                target.set_path(&crate::gateway::upstream_api_path(&upstream_base, path));
+                upstream_base.path().trim_end_matches('/')
+            };
+            let action = if request_is_streaming(&bytes) {
+                "streamGenerateContent"
+            } else {
+                "generateContent"
+            };
+            target.set_path(&format!("{root}/models/{model}:{action}"));
+            if request_is_streaming(&bytes) {
+                target.set_query(Some("alt=sse"));
             }
+        } else {
+            let path = match destination {
+                crate::protocol::WireProtocol::Responses => "/v1/responses",
+                crate::protocol::WireProtocol::Messages => "/v1/messages",
+                crate::protocol::WireProtocol::ChatCompletions => "/v1/chat/completions",
+                crate::protocol::WireProtocol::Gemini => unreachable!(),
+            };
+            target.set_path(&crate::gateway::upstream_api_path(&upstream_base, path));
         }
     }
     let request_bytes = if conversion_enabled {
@@ -966,10 +966,10 @@ async fn forward(
                 .map(|value| {
                     let mut converted =
                         crate::protocol::convert_request(value, source, target_protocol);
-                    if target_protocol == crate::protocol::WireProtocol::ChatCompletions {
-                        if let Ok(cache) = state.tool_signatures.lock() {
-                            cache.restore(&configuration, &mut converted);
-                        }
+                    if target_protocol == crate::protocol::WireProtocol::ChatCompletions
+                        && let Ok(cache) = state.tool_signatures.lock()
+                    {
+                        cache.restore(&configuration, &mut converted);
                     }
                     converted
                 })
@@ -1078,100 +1078,96 @@ async fn forward(
             usage.parser.set_content_type(content_type);
         }
     }
-    if let (Some(source), Some(destination)) = (target_protocol, source_protocol) {
-        if source != destination && status.is_success() {
-            let content_type = headers
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("");
-            if content_type.contains("text/event-stream")
-                && source == crate::protocol::WireProtocol::ChatCompletions
-                && destination == crate::protocol::WireProtocol::Messages
-            {
-                let mut tracker = crate::tool_signatures::Tracker::new(
-                    state.tool_signatures.clone(),
-                    configuration,
-                );
-                let upstream_stream =
-                    futures_util::StreamExt::map(response.bytes_stream(), move |chunk| {
-                        if let Ok(bytes) = &chunk {
-                            tracker.sse(bytes);
-                        }
-                        chunk
-                    });
-                let converted_stream =
-                    incremental_chat_to_messages_stream(upstream_stream, request_usage, active);
-                return output
-                    .body(StreamBody::new(converted_stream).boxed_unsync())
-                    .context("构造流式协议转换响应失败");
-            }
-            let upstream_body = response.bytes().await.context("读取协议转换响应失败")?;
-            if source == crate::protocol::WireProtocol::ChatCompletions {
-                let mut tracker = crate::tool_signatures::Tracker::new(
-                    state.tool_signatures.clone(),
-                    configuration,
-                );
-                if content_type.contains("text/event-stream") {
-                    tracker.sse(&upstream_body);
-                } else {
-                    tracker.json(&upstream_body);
-                }
-            }
-            if let Some(usage) = request_usage.as_mut() {
-                if !upstream_body.is_empty() {
-                    usage.mark_first_byte();
-                }
-                usage.parser.feed(&upstream_body);
-            }
-            let mut converted = convert_response_body(&upstream_body, source, destination);
-            if destination == crate::protocol::WireProtocol::Responses {
-                if let (Ok(mut value), Ok(request)) = (
-                    serde_json::from_slice::<Value>(&converted),
-                    serde_json::from_slice::<Value>(&bytes),
-                ) {
-                    crate::protocol::restore_responses_tool_names(&mut value, &request);
-                    if let Ok(body) = serde_json::to_vec(&value) {
-                        converted = Bytes::from(body);
+    if let (Some(source), Some(destination)) = (target_protocol, source_protocol)
+        && source != destination
+        && status.is_success()
+    {
+        let content_type = headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        if content_type.contains("text/event-stream")
+            && source == crate::protocol::WireProtocol::ChatCompletions
+            && destination == crate::protocol::WireProtocol::Messages
+        {
+            let mut tracker =
+                crate::tool_signatures::Tracker::new(state.tool_signatures.clone(), configuration);
+            let upstream_stream =
+                futures_util::StreamExt::map(response.bytes_stream(), move |chunk| {
+                    if let Ok(bytes) = &chunk {
+                        tracker.sse(bytes);
                     }
-                }
-            }
-            let mut output = Response::builder().status(status);
-            if let Some(headers_out) = output.headers_mut() {
-                for (name, value) in &headers {
-                    if name != HeaderName::from_static("content-length")
-                        && name != HeaderName::from_static("transfer-encoding")
-                        && name != HeaderName::from_static("content-encoding")
-                        && name != CONTENT_TYPE
-                    {
-                        headers_out.insert(name, value.clone());
-                    }
-                }
-                let converted_type = if content_type.contains("text/event-stream") {
-                    "text/event-stream"
-                } else {
-                    "application/json"
-                };
-                headers_out.insert(CONTENT_TYPE, converted_type.parse().unwrap());
-            }
-            let payload = if content_type.contains("text/event-stream") {
-                format_converted_sse(&converted, destination)
-            } else {
-                converted
-            };
-            return output
-                .body(
-                    Full::new(payload)
-                        .map_err(|never| -> BoxError { match never {} })
-                        .boxed_unsync(),
-                )
-                .context("构造协议转换响应失败")
-                .map(|response| {
-                    if let Some(mut usage) = request_usage {
-                        usage.finish(true);
-                    }
-                    response
+                    chunk
                 });
+            let converted_stream =
+                incremental_chat_to_messages_stream(upstream_stream, request_usage, active);
+            return output
+                .body(StreamBody::new(converted_stream).boxed_unsync())
+                .context("构造流式协议转换响应失败");
         }
+        let upstream_body = response.bytes().await.context("读取协议转换响应失败")?;
+        if source == crate::protocol::WireProtocol::ChatCompletions {
+            let mut tracker =
+                crate::tool_signatures::Tracker::new(state.tool_signatures.clone(), configuration);
+            if content_type.contains("text/event-stream") {
+                tracker.sse(&upstream_body);
+            } else {
+                tracker.json(&upstream_body);
+            }
+        }
+        if let Some(usage) = request_usage.as_mut() {
+            if !upstream_body.is_empty() {
+                usage.mark_first_byte();
+            }
+            usage.parser.feed(&upstream_body);
+        }
+        let mut converted = convert_response_body(&upstream_body, source, destination);
+        if destination == crate::protocol::WireProtocol::Responses
+            && let (Ok(mut value), Ok(request)) = (
+                serde_json::from_slice::<Value>(&converted),
+                serde_json::from_slice::<Value>(&bytes),
+            )
+        {
+            crate::protocol::restore_responses_tool_names(&mut value, &request);
+            if let Ok(body) = serde_json::to_vec(&value) {
+                converted = Bytes::from(body);
+            }
+        }
+        let mut output = Response::builder().status(status);
+        if let Some(headers_out) = output.headers_mut() {
+            for (name, value) in &headers {
+                if name != HeaderName::from_static("content-length")
+                    && name != HeaderName::from_static("transfer-encoding")
+                    && name != HeaderName::from_static("content-encoding")
+                    && name != CONTENT_TYPE
+                {
+                    headers_out.insert(name, value.clone());
+                }
+            }
+            let converted_type = if content_type.contains("text/event-stream") {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
+            headers_out.insert(CONTENT_TYPE, converted_type.parse().unwrap());
+        }
+        let payload = if content_type.contains("text/event-stream") {
+            format_converted_sse(&converted, destination)
+        } else {
+            converted
+        };
+        return output
+            .body(
+                Full::new(payload)
+                    .map_err(|never| -> BoxError { match never {} })
+                    .boxed_unsync(),
+            )
+            .context("构造协议转换响应失败")
+            .inspect(|_response| {
+                if let Some(mut usage) = request_usage {
+                    usage.finish(true);
+                }
+            });
     }
     let bytes_stream = response.bytes_stream();
     let stream = futures_util::stream::unfold(
@@ -1246,10 +1242,11 @@ where
                 if let Some(bytes) = pending.pop_front() {
                     // Completion is a protocol event, not a TCP EOF. Some
                     // clients stop reading immediately after message_stop.
-                    if upstream_done && pending.is_empty() {
-                        if let Some(mut usage) = request_usage.take() {
-                            usage.finish(converter.succeeded());
-                        }
+                    if upstream_done
+                        && pending.is_empty()
+                        && let Some(mut usage) = request_usage.take()
+                    {
+                        usage.finish(converter.succeeded());
                     }
                     return Some((
                         Ok::<_, BoxError>(Frame::data(bytes)),

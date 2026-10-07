@@ -204,10 +204,10 @@ fn messages_to_chat(mut value: Value) -> Value {
             ),
         );
     }
-    if let Some(thinking) = map.remove("thinking") {
-        if thinking.get("type").and_then(Value::as_str) == Some("enabled") {
-            out.insert("reasoning_effort".into(), json!("high"));
-        }
+    if let Some(thinking) = map.remove("thinking")
+        && thinking.get("type").and_then(Value::as_str) == Some("enabled")
+    {
+        out.insert("reasoning_effort".into(), json!("high"));
     }
     if let Some(v) = map.remove("max_tokens") {
         out.insert("max_tokens".to_owned(), v);
@@ -377,25 +377,25 @@ fn responses_to_chat(mut value: Value) -> Value {
             out.insert("tools".into(), Value::Array(converted));
         }
     }
-    if out.contains_key("tools") {
-        if let Some(choice) = map.remove("tool_choice") {
-            let choice = if choice.get("type").and_then(Value::as_str) == Some("function") {
-                json!({"type":"function","function":{"name":responses_wire_tool_name(&choice)}})
-            } else if choice.is_string() {
-                choice
-            } else {
-                json!("auto")
-            };
-            out.insert("tool_choice".into(), choice);
-        }
+    if out.contains_key("tools")
+        && let Some(choice) = map.remove("tool_choice")
+    {
+        let choice = if choice.get("type").and_then(Value::as_str) == Some("function") {
+            json!({"type":"function","function":{"name":responses_wire_tool_name(&choice)}})
+        } else if choice.is_string() {
+            choice
+        } else {
+            json!("auto")
+        };
+        out.insert("tool_choice".into(), choice);
     }
     if out.get("stream") == Some(&Value::Bool(true)) {
         out.insert("stream_options".into(), json!({"include_usage":true}));
     }
-    if let Some(reasoning) = map.remove("reasoning") {
-        if let Some(effort) = reasoning.get("effort") {
-            out.insert("reasoning_effort".into(), effort.clone());
-        }
+    if let Some(reasoning) = map.remove("reasoning")
+        && let Some(effort) = reasoning.get("effort")
+    {
+        out.insert("reasoning_effort".into(), effort.clone());
     }
     if let Some(effort) = map.remove("reasoning_effort") {
         out.insert("reasoning_effort".into(), effort);
